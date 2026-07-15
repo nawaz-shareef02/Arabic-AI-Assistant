@@ -1,0 +1,4 @@
+The ArabIQ Enterprise AI Platform is an advanced multilingual document analysis assistant.
+It supports bilingual semantic search and grounding using Qwen3 8B.
+Sprint 9 completes the end-to-end integration between frontend and backend.
+This document is used for validating the ingestion and RAG capabilities of the platform.
