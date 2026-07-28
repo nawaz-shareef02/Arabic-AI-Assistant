@@ -6,11 +6,15 @@ from app.services.qdrant_service import QdrantService
 
 class SearchService:
     """
-    Enterprise Semantic Search Service
+    Enterprise Semantic Search Service.
+
+    Uses singleton EmbeddingService and QdrantService so no heavy objects
+    are re-instantiated per request.
     """
 
     def __init__(self, db: Session):
         self.db = db
+        # Both constructors return singleton-backed instances — no re-initialization.
         self.embedding_service = EmbeddingService()
         self.qdrant_service = QdrantService()
 
@@ -21,20 +25,10 @@ class SearchService:
         top_k: int = 5,
     ):
 
-        print("=" * 60)
-        print("SEARCH SERVICE")
-        print("Query:", query)
-        print("KB:", knowledge_base_id)
-        print("Top K:", top_k)
-        print("=" * 60)
-
         results = self.qdrant_service.search(
             query=query,
             knowledge_base_id=knowledge_base_id,
             limit=top_k,
         )
-
-        print("Returned:", len(results))
-        print("=" * 60)
 
         return results

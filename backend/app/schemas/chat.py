@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -10,6 +12,11 @@ class ChatRequest(BaseModel):
     )
 
     knowledge_base_id: int
+
+    # Optional — when provided, activates the conversational RAG pipeline
+    # and persists messages to the database.
+    # When absent, the stateless (original) pipeline runs unchanged.
+    conversation_id: Optional[int] = None
 
 
 class SourceResponse(BaseModel):
@@ -25,4 +32,4 @@ class ChatResponse(BaseModel):
 
     answer: str
 
-    sources: list[SourceResponse]
+    sources: list[SourceResponse]

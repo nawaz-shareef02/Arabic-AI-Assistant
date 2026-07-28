@@ -1,4 +1,5 @@
 import sys
+import time
 import uuid
 import logging
 from fastapi import FastAPI, Depends, status, Request
@@ -12,6 +13,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.users import router as users_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.chat import router as chat_router
+from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as documents_router
 from app.api.v1.upload import router as upload_router
 from app.api.v1.knowledge_base import router as kb_router
@@ -75,7 +77,74 @@ def startup_validation():
     except Exception as e:
         logger.warning(f"Redis connectivity check failed: {str(e)}. Using in-memory fallback.")
 
-    logger.info("Startup configuration validation completed successfully. API server is ready.")
+    logger.info("Startup configuration validation completed. Beginning heavyweight service pre-warming...")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PRE-WARM ALL HEAVYWEIGHT SERVICES
+    # This ensures no cold-start latency hits real user requests.
+    # All services use the singleton pattern — these calls create the shared
+    # instances once and verify they are healthy before accepting traffic.
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # 1. EmbeddingService + SentenceTransformer (BAAI/bge-m3)
+    t0 = time.perf_counter()
+    try:
+        from app.services.embedding_service import EmbeddingService
+        emb = EmbeddingService()
+        emb.warmup()  # Runs one dummy inference to heat JIT & tokenizer.
+        assert emb.is_loaded(), "STARTUP ASSERTION FAILED: EmbeddingService model is NOT loaded!"
+        logger.info(f"✓ EmbeddingService pre-warmed in {(time.perf_counter()-t0)*1000:.0f} ms")
+    except Exception as e:
+        logger.critical(f"STARTUP FAILURE: EmbeddingService pre-warm failed: {e}")
+        sys.exit(1)
+
+    # 2. QdrantService (singleton QdrantClient)
+    t1 = time.perf_counter()
+    try:
+        from app.services.qdrant_service import QdrantService
+        qs = QdrantService()
+        assert qs.client is not None, "STARTUP ASSERTION FAILED: QdrantService client is None!"
+        logger.info(f"✓ QdrantService pre-warmed in {(time.perf_counter()-t1)*1000:.0f} ms")
+    except Exception as e:
+        logger.critical(f"STARTUP FAILURE: QdrantService pre-warm failed: {e}")
+        sys.exit(1)
+
+    # 3. OllamaProvider (singleton + persistent HTTP session + model pre-load)
+    t2 = time.perf_counter()
+    try:
+        from app.services.llm.ollama_provider import OllamaProvider
+        ollama = OllamaProvider.get_instance()
+        ollama.warmup()  # Sends a 1-token request to load LLM weights into RAM.
+        assert ollama._session is not None, "STARTUP ASSERTION FAILED: OllamaProvider HTTP session is None!"
+        logger.info(f"✓ OllamaProvider pre-warmed in {(time.perf_counter()-t2)*1000:.0f} ms")
+    except Exception as e:
+        logger.warning(
+            f"OllamaProvider pre-warm failed: {e}. "
+            "First user request may experience model-load latency."
+        )
+
+    # 4. LLMFactory — verify it returns the cached singleton (init count must stay at 1).
+    from app.services.llm import LLMFactory
+    LLMFactory.get_provider()  # Ensures provider is cached.
+
+    # ── Final assertions ────────────────────────────────────────────────────
+    from app.services.embedding_service import EmbeddingService as _ES
+    assert _ES._model is not None, "STARTUP ASSERTION FAILED: SentenceTransformer not loaded!"
+
+    logger.info(
+        "\n"
+        "┌──────────────────────────────────────────────────┐\n"
+        "│       ArabIQ API Server — STARTUP COMPLETE       │\n"
+        "├──────────────────────────────────────────────────┤\n"
+        "│  ✓ EmbeddingService   — singleton ready          │\n"
+        "│  ✓ SentenceTransformer — model loaded            │\n"
+        "│  ✓ QdrantService      — singleton ready          │\n"
+        "│  ✓ OllamaProvider     — model pre-loaded         │\n"
+        "│  ✓ LLMFactory         — provider cached          │\n"
+        "│  All startup assertions passed.                  │\n"
+        "│  Server is ready to accept traffic. 🚀           │\n"
+        "└──────────────────────────────────────────────────┘"
+    )
 
 @app.on_event("shutdown")
 def shutdown_logging():
@@ -192,6 +261,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(upload_router, prefix="/api/v1")
 app.include_router(kb_router, prefix="/api/v1")

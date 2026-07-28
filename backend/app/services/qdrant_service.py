@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import List, Optional
 from uuid import UUID
 
@@ -17,23 +18,58 @@ from app.services.embedding_service import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Module-level singleton state — one QdrantClient for the process lifetime.
+# ---------------------------------------------------------------------------
+_instance: "QdrantService | None" = None
+_instance_lock = threading.Lock()
+_init_count: int = 0
+
 
 class QdrantService:
     """
-    Enterprise Qdrant Vector Database Service
+    Enterprise Qdrant Vector Database Service — Singleton Pattern.
+
+    Guarantees:
+    - A single QdrantClient is created once and reused across all requests.
+    - Thread-safe double-checked locking prevents duplicate construction.
+    - Initialization count is logged:
+        "QdrantService initialized (1)"   ← correct
+        "QdrantService initialized (2)"   ← should never appear.
     """
 
-    def __init__(self):
+    # Class-level client cache.
+    _client: QdrantClient | None = None
 
-        self.client = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT,
-            check_compatibility=False,
-        )
+    def __init__(self):
+        global _init_count
+        # Fast path: client already present.
+        if QdrantService._client is not None:
+            self.embedding_service = EmbeddingService()
+            self.collection_name = settings.QDRANT_COLLECTION
+            return
+
+        # Slow path: create client under lock.
+        with _instance_lock:
+            if QdrantService._client is None:
+                _init_count += 1
+                QdrantService._client = QdrantClient(
+                    host=settings.QDRANT_HOST,
+                    port=settings.QDRANT_PORT,
+                    check_compatibility=False,
+                )
+                logger.info(
+                    f"QdrantService initialized ({_init_count}) "
+                    f"— host={settings.QDRANT_HOST}:{settings.QDRANT_PORT}"
+                )
 
         self.embedding_service = EmbeddingService()
-
         self.collection_name = settings.QDRANT_COLLECTION
+
+    # Expose client for convenience.
+    @property
+    def client(self) -> QdrantClient:
+        return QdrantService._client  # type: ignore[return-value]
 
     # --------------------------------------------------
     # Collection
@@ -73,66 +109,37 @@ class QdrantService:
         self,
         chunks,
         embeddings: List[List[float]],
-        knowledge_base_id: Optional[int] = None,
+        knowledge_base_id: int,
     ):
-
-        if knowledge_base_id is None and chunks:
-            try:
-                first_chunk = chunks[0]
-                if (
-                    hasattr(first_chunk, "parsed_document")
-                    and first_chunk.parsed_document
-                    and hasattr(first_chunk.parsed_document, "document")
-                    and first_chunk.parsed_document.document
-                ):
-                    knowledge_base_id = first_chunk.parsed_document.document.knowledge_base_id
-            except Exception as e:
-                logger.warning(f"Could not resolve knowledge_base_id from chunk: {e}")
+        if knowledge_base_id is None:
+            raise ValueError("knowledge_base_id must be explicitly provided to QdrantService.upsert_chunks")
 
         points = []
 
         for chunk, embedding in zip(chunks, embeddings):
-
             points.append(
-
                 PointStruct(
-
                     id=chunk.id,
-
                     vector=embedding,
-
                     payload={
-
                         "chunk_uuid": str(chunk.uuid),
-
                         "parsed_document_id": chunk.parsed_document_id,
-
-                        "knowledge_base_id": knowledge_base_id,
-
+                        "knowledge_base_id": int(knowledge_base_id),
                         "chunk_index": chunk.chunk_index,
-
                         "text": chunk.chunk_text,
-
                         "char_count": chunk.char_count,
-
                         "estimated_tokens": chunk.estimated_tokens,
-
                     },
-
                 )
-
             )
 
         self.client.upsert(
-
             collection_name=self.collection_name,
-
             points=points,
-
         )
 
         logger.info(
-            f"{len(points)} vectors indexed into Qdrant."
+            f"{len(points)} vectors indexed into Qdrant for Knowledge Base {knowledge_base_id}."
         )
 
     # --------------------------------------------------

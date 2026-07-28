@@ -14,8 +14,8 @@ class ChunkService:
     def __init__(
         self,
         db: Session = None,
-        chunk_size: int = 900,
-        overlap: int = 150,
+        chunk_size: int = 600,
+        overlap: int = 100,
     ):
         self.db = db
         self.chunk_size = chunk_size

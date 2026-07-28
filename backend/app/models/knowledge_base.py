@@ -8,6 +8,7 @@ from app.database.base import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.document import Document
+    from app.models.conversation import Conversation
 
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
@@ -55,4 +56,8 @@ class KnowledgeBase(Base):
     documents: Mapped[List["Document"]] = relationship(
         back_populates="knowledge_base",
         cascade="all, delete-orphan"
+    )
+    conversations: Mapped[List["Conversation"]] = relationship(
+        back_populates="knowledge_base",
+        cascade="all, delete-orphan",
     )

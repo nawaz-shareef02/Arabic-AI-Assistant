@@ -15,7 +15,11 @@ class IndexingService:
         self.embedding_service = EmbeddingService()
         self.qdrant_service = QdrantService()
 
-    def index_document(self, parsed_document: ParsedDocument) -> int:
+    def index_document(
+        self,
+        parsed_document: ParsedDocument,
+        knowledge_base_id: int = None,
+    ) -> int:
         """
         Generate embeddings for all chunks and store them in Qdrant.
 
@@ -28,17 +32,26 @@ class IndexingService:
         if not chunks:
             raise ValueError("No document chunks found.")
 
+        # Resolve knowledge_base_id explicitly if not passed
+        if knowledge_base_id is None:
+            from app.models.document import Document
+            doc = self.db.query(Document).filter(Document.id == parsed_document.document_id).first()
+            if doc:
+                knowledge_base_id = doc.knowledge_base_id
+            else:
+                raise ValueError(f"Knowledge base ID could not be resolved for ParsedDocument {parsed_document.id}")
+
         # Extract chunk texts
         texts = [chunk.chunk_text for chunk in chunks]
 
         # Generate embeddings
         embeddings = self.embedding_service.embed_batch(texts)
 
-        # Store embeddings in Qdrant
+        # Store embeddings in Qdrant with explicit knowledge_base_id
         self.qdrant_service.upsert_chunks(
             chunks=chunks,
             embeddings=embeddings,
-            knowledge_base_id=parsed_document.document.knowledge_base_id,
+            knowledge_base_id=knowledge_base_id,
         )
 
         return len(chunks)

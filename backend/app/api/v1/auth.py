@@ -1,5 +1,6 @@
 import logging
 from fastapi import APIRouter, Depends, status, Request, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db, get_current_user
@@ -43,6 +44,24 @@ def login(request: LoginRequest, fastapi_req: Request, db: Session = Depends(get
         )
     auth_service = AuthService(db)
     user = auth_service.authenticate_user(request, client_ip)
+    return auth_service.generate_token(user)
+
+@router.post("/token", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+def login_for_access_token(
+    fastapi_req: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    client_ip = get_client_ip(fastapi_req)
+    if login_limiter.is_rate_limited(client_ip):
+        logger.warning(f"AUDIT | Action: rate_limit_exceeded | Key: {client_ip} | Limiter: login_token | Status: blocked")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again in 15 minutes."
+        )
+    auth_service = AuthService(db)
+    login_req = LoginRequest(email=form_data.username, password=form_data.password)
+    user = auth_service.authenticate_user(login_req, client_ip)
     return auth_service.generate_token(user)
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)

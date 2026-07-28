@@ -1,3 +1,17 @@
+# Environment & Secret Files (CRITICAL SECURITY)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+*.pem
+*.key
+*.p12
+
 # Python
 __pycache__/
 *.py[cod]
@@ -10,13 +24,31 @@ env/
 .coverage
 htmlcov/
 
-# Backend env
-backend/.env
+# User Uploads & Data Isolation
+uploads/
+backend/uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector DB & Docker Persistent Storage
+docker/qdrant_data/
+qdrant_data/
 
 # Node / Next.js
+node_modules/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/build/
+
+# Temp, Logs & OS
 .DS_Store
+Thumbs.db
 *.log
+*.tmp
+*.bak
+*copy.txt
+*.copy.txt
+.vscode/
+.idea/

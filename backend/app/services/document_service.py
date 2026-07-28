@@ -191,7 +191,7 @@ class DocumentService:
             # Vector Indexing
             from app.services.indexing_service import IndexingService
             indexing_service = IndexingService(db)
-            indexed_chunks = indexing_service.index_document(parsed_doc)
+            indexed_chunks = indexing_service.index_document(parsed_doc, knowledge_base_id=doc.knowledge_base_id)
             logger.info(
                 f"AUDIT | Action: vector_indexing | "
                 f"Doc: {doc_uuid} | "

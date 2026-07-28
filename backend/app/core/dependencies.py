@@ -10,7 +10,7 @@ from app.core.rate_limit import api_limiter
 import logging
 
 logger = logging.getLogger("app.core.dependencies")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()

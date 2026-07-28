@@ -7,6 +7,7 @@ from app.database.base import Base
 
 if TYPE_CHECKING:
     from app.models.knowledge_base import KnowledgeBase
+    from app.models.conversation import Conversation
 
 class User(Base):
     __tablename__ = "users"
@@ -47,5 +48,10 @@ class User(Base):
         back_populates="owner",
         foreign_keys="[KnowledgeBase.owner_id]",
         cascade="all, delete-orphan"
+    )
+    conversations: Mapped[List["Conversation"]] = relationship(
+        back_populates="user",
+        foreign_keys="[Conversation.user_id]",
+        cascade="all, delete-orphan",
     )
 

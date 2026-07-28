@@ -40,13 +40,18 @@ api.interceptors.response.use(
   (error) => {
     if (error.response && error.response.status === 401) {
       if (typeof window !== "undefined") {
-        // Evict local authentication credentials
-        localStorage.removeItem("arabiq_user_session");
-        document.cookie = "arabiq-session=;path=/;expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        
-        const path = window.location.pathname;
-        if (path !== "/login" && path !== "/session-expired" && path !== "/register") {
-          window.location.href = "/session-expired";
+        const url: string = error.config?.url || "";
+        // Skip redirect for auth-related endpoints — their 401s are handled by callers
+        const isAuthEndpoint = url.includes("/auth/");
+        if (!isAuthEndpoint) {
+          // Evict local authentication credentials
+          localStorage.removeItem("arabiq_user_session");
+          document.cookie = "arabiq-session=;path=/;expires=Thu, 01 Jan 1970 00:00:01 GMT";
+
+          const path = window.location.pathname;
+          if (path !== "/login" && path !== "/session-expired" && path !== "/register") {
+            window.location.href = "/session-expired";
+          }
         }
       }
     }

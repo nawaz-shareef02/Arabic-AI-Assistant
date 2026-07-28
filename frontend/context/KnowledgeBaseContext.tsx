@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { KnowledgeBaseItem, KnowledgeBaseService } from "@/services/knowledge-base";
 import { DocumentsService } from "@/services/documents";
+import { useAuth } from "@/context/AuthContext";
 
 interface KnowledgeBaseContextType {
   knowledgeBases: KnowledgeBaseItem[];
@@ -19,6 +20,7 @@ interface KnowledgeBaseContextType {
 const KnowledgeBaseContext = createContext<KnowledgeBaseContextType | undefined>(undefined);
 
 export function KnowledgeBaseProvider({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseItem[]>([]);
   const [selectedKbId, setSelectedKbId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -63,9 +65,20 @@ export function KnowledgeBaseProvider({ children }: { children: React.ReactNode 
     }
   };
 
+  // Only fetch knowledge bases after authentication is confirmed
   useEffect(() => {
+    if (authLoading) return; // Wait for auth to finish verifying the session
+
+    if (!isAuthenticated) {
+      // User logged out or is not authenticated — clear KB state
+      setKnowledgeBases([]);
+      setSelectedKbId(null);
+      setIsLoading(false);
+      return;
+    }
+
     refreshKnowledgeBases();
-  }, []);
+  }, [isAuthenticated, authLoading]);
 
   const createKB = async (name: string) => {
     setError(null);
