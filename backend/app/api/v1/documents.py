@@ -1,26 +1,63 @@
+import logging
 import uuid as py_uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Query, status, Response, File, UploadFile, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, Query, status, Response, File, UploadFile, Form
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db, get_current_user, require_permission
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse
 from app.services.document_service import DocumentService
+from app.tasks.indexing_tasks import process_document_async
 
+logger = logging.getLogger("app.api.v1.documents")
 router = APIRouter(prefix="/documents", tags=["DOCUMENTS"])
 
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     knowledge_base_uuid: py_uuid.UUID = Form(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("documents.upload"))
 ):
+    """
+    Upload a document and dispatch async Celery processing.
+
+    The HTTP response returns immediately after saving the document metadata
+    and dispatching the Celery task.  Actual parsing, chunking, embedding,
+    and Qdrant indexing happen in the background worker process.
+
+    The document status will transition:
+      QUEUED → PARSING → CHUNKING → INDEXING → PARSED (searchable)
+    """
     service = DocumentService(db)
-    db_doc = await service.upload_document(file, kb_uuid=knowledge_base_uuid, creator_id=current_user.id)
-    background_tasks.add_task(service.process_document, db_doc.uuid, current_user.id)
+    db_doc = await service.upload_document(
+        file,
+        kb_uuid=knowledge_base_uuid,
+        creator_id=current_user.id,
+    )
+
+    # Dispatch Celery task — FastAPI web process does NOT perform processing.
+    # The task is identified by the document's integer PK and KB integer PK.
+    # Both are server-resolved values (not from the client).
+    try:
+        process_document_async.delay(db_doc.id, db_doc.knowledge_base_id)
+        logger.info(
+            "AUDIT | action: celery_task_dispatched | Doc: %s | KB: %s | User: %s",
+            db_doc.uuid,
+            db_doc.knowledge_base_id,
+            current_user.id,
+        )
+    except Exception as dispatch_exc:
+        # If Redis is temporarily unavailable, log the error but still return
+        # the document record so the client is not blocked.  The document
+        # will remain in QUEUED status and can be retried by an operator.
+        logger.error(
+            "AUDIT | action: celery_dispatch_failed | Doc: %s | Error: %s",
+            db_doc.uuid,
+            dispatch_exc,
+        )
+
     return db_doc
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)

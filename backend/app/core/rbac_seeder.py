@@ -77,6 +77,13 @@ def seed_rbac(db: Session) -> None:
     perm_repo = PermissionRepository(db)
     role_repo = RoleRepository(db)
 
+    from app.models.organization import Organization
+    default_org = db.query(Organization).filter(Organization.id == 1).first()
+    if not default_org:
+        default_org = Organization(id=1, name="Default Organization", slug="default-org", is_active=True)
+        db.add(default_org)
+        db.commit()
+
     # 1. Seed Permissions
     perm_map = {}
     for p_def in DEFAULT_PERMISSIONS:

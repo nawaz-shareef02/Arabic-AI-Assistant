@@ -24,6 +24,8 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 def fixture_db_session():
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
+    from app.core.rbac_seeder import seed_rbac
+    seed_rbac(db)
     try:
         yield db
     finally:

@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 sqlalchemy
+psycopg2-binary
 pydantic-settings
 python-dotenv
 python-multipart
@@ -9,9 +10,10 @@ python-jose[cryptography]
 httpx
 pypdf
 python-docx
+torch
 sentence-transformers
 qdrant-client
 redis
 celery>=5.3.0
 prometheus-client>=0.20.0
-
+pytest

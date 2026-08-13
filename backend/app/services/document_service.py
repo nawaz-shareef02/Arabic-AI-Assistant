@@ -76,7 +76,7 @@ class DocumentService:
             storage_path=stored_path,
             mime_type=file.content_type or "application/octet-stream",
             language=None,  # Null on upload
-            status=DocumentStatus.UPLOADED,  # "Uploaded" status for virus scan workflow
+            status=DocumentStatus.QUEUED,  # Waiting for Celery worker (P0-2)
             file_size=file_size,
             sha256_hash=sha256_hash,
             created_by=creator_id,
@@ -102,152 +102,14 @@ class DocumentService:
         
         return db_doc
 
-    def process_document(self, doc_uuid: py_uuid.UUID, owner_id: int) -> None:
-        from app.database.session import SessionLocal
-        from app.models.parsed_document import ParsedDocument
-        from app.services.parser_service import ParserService, normalize_text, detect_language_and_confidence
-        from app.services.parsers.base import DocumentParsingError
-        from app.services.chunk_service import ChunkService
-        from app.utils.security_scanner import SecurityScanner
-        
-        db = SessionLocal()
-        start_time = time.time()
-        logger = logging.getLogger("app.services.document_service")
-        parser_name = "Unknown"
-        page_count = None
-        char_count = 0
-        success = False
-        error_msg = None
-        kb_uuid = None
-        doc = None
-        
-        try:
-            # 1. Fetch document
-            doc = db.query(Document).filter(Document.uuid == doc_uuid).first()
-            if not doc:
-                logger = logging.getLogger("app.services.document_service")
-                logger.error(f"Document processing failed: Document {doc_uuid} not found")
-                return
-                
-            # Verify ownership
-            if doc.created_by != owner_id:
-                logger = logging.getLogger("app.services.document_service")
-                logger.error(f"AUDIT | Action: unauthorized_access | User: {owner_id} | Resource: Document {doc_uuid} | Reason: Ownership check failed")
-                return
+    # -------------------------------------------------------------------------
+    # NOTE (P0-2): process_document() has been moved to the Celery task
+    # app.tasks.indexing_tasks.process_document_async.  The FastAPI router
+    # dispatches that task via .delay() immediately after upload_document()
+    # returns.  No document processing occurs in this service or in the
+    # FastAPI web process.
+    # -------------------------------------------------------------------------
 
-            # Verify file with security scanner
-            scanner = SecurityScanner()
-            if not scanner.scan_file(doc.storage_path):
-                doc.status = DocumentStatus.FAILED
-                db.commit()
-                logger = logging.getLogger("app.services.document_service")
-                logger.error(f"AUDIT | Action: doc_processing_failed | Doc: {doc_uuid} | Reason: Security threat detected")
-                return
-                
-            kb_uuid = doc.knowledge_base.uuid
-            
-            # 2. Update status to PARSING
-            doc.status = DocumentStatus.PARSING
-            db.commit()
-            db.refresh(doc)
-            
-            # 3. Parse content
-            parser_service = ParserService()
-            result = parser_service.parse_document(doc.storage_path)
-            
-            # Extract parser class name
-            from app.services.parsers.factory import ParserFactory
-            parser_obj = ParserFactory.get_parser(doc.storage_path)
-            parser_name = parser_obj.__class__.__name__
-            page_count = result.page_count
-            
-            # 4. Normalize clean text
-            clean_text = normalize_text(result.text)
-            char_count = len(clean_text)
-            
-            # 5. Detect language and confidence
-            lang, confidence = detect_language_and_confidence(clean_text)
-            
-            # 6. Save ParsedDocument
-            parsed_doc = ParsedDocument(
-                document_id=doc.id,
-                parsed_text=clean_text,
-                parser_version=parser_name,
-                language_confidence=confidence,
-                char_count=char_count,
-                page_count=page_count,
-                processing_duration=time.time() - start_time
-            )
-            db.add(parsed_doc)
-            db.commit()
-            db.refresh(parsed_doc)
-            logger.info(f"AUDIT | Action: doc_parsing | Doc: {doc_uuid} | Status: success")
-            
-            # 7. Generate Document Chunks
-            chunk_service = ChunkService(db)
-            chunk_count = chunk_service.create_chunks(parsed_doc)
-            logger.info(f"AUDIT | Action: chunk_generation | Doc: {doc_uuid} | Chunks: {chunk_count} | Status: success")
-            
-            # Vector Indexing
-            from app.services.indexing_service import IndexingService
-            indexing_service = IndexingService(db)
-            indexed_chunks = indexing_service.index_document(parsed_doc, knowledge_base_id=doc.knowledge_base_id)
-            logger.info(
-                f"AUDIT | Action: vector_indexing | "
-                f"Doc: {doc_uuid} | "
-                f"Vectors: {indexed_chunks} | "
-                f"Status: success"
-            )
-            
-            # 8. Update Document Metadata
-            doc.chunk_count = chunk_count
-            doc.language = lang
-            doc.status = DocumentStatus.PARSED
-            doc.error_message = None  # Clear any previous error message on retry
-            
-            db.commit()
-            db.refresh(doc)
-
-            # 9. Trigger Asynchronous Intelligence Pipeline (Non-blocking)
-            from app.tasks.intelligence_tasks import run_async_document_intelligence
-            import threading
-            threading.Thread(
-                target=run_async_document_intelligence,
-                args=(doc.id,),
-                daemon=True
-            ).start()
-
-            success = True
-            
-        except DocumentParsingError as e:
-            error_msg = str(e)
-            if doc:
-                doc.status = DocumentStatus.FAILED
-                doc.error_message = error_msg
-                db.commit()
-            logger.error(f"AUDIT | Action: doc_processing_failed | Doc: {doc_uuid} | Reason: {error_msg}")
-        except Exception as e:
-            error_msg = f"Unexpected error: {str(e)}"
-            if doc:
-                doc.status = DocumentStatus.FAILED
-                doc.error_message = error_msg
-                db.commit()
-            logger.error(f"AUDIT | Action: doc_processing_failed | Doc: {doc_uuid} | Reason: {error_msg}")
-        finally:
-            duration = time.time() - start_time
-            proc_logger = logging.getLogger("app.services.document_processing")
-            status_str = "SUCCESS" if success else f"FAILED ({error_msg})"
-            proc_logger.info(
-                f"Document processing completed | "
-                f"Document UUID: {doc_uuid} | "
-                f"KB UUID: {kb_uuid} | "
-                f"Duration: {duration:.4f}s | "
-                f"Parser: {parser_name} | "
-                f"Pages: {page_count} | "
-                f"Characters: {char_count} | "
-                f"Status: {status_str}"
-            )
-            db.close()
 
     def create_doc(self, doc_in: DocumentCreate, creator_id: int) -> Document:
         # Assert parent knowledge base exists and is owned by creator

@@ -1,56 +1,32 @@
-from app.database.session import SessionLocal
+import pytest
+from unittest.mock import MagicMock, patch
 from app.services.rag_service import RAGService
 
 
-def main():
+def test_rag_service_ask():
+    """Test RAGService.ask with mocked search and LLM services."""
+    mock_db = MagicMock()
 
-    db = SessionLocal()
+    mock_result = MagicMock()
+    mock_result.text = "Saudi Vision 2030 details"
+    mock_result.score = 0.9
+    mock_result.chunk_uuid = "chunk-1"
+    mock_result.parsed_document_id = 10
+    mock_result.payload = {"text": "Saudi Vision 2030 details", "chunk_uuid": "chunk-1", "parsed_document_id": 10}
 
-    try:
+    with patch("app.services.rag_service.SearchService") as mock_search_cls, \
+         patch("app.services.rag_service.LLMFactory") as mock_llm_factory:
 
-        rag = RAGService(db)
+        mock_search_svc = mock_search_cls.return_value
+        mock_search_svc.hybrid_search.return_value = [mock_result]
 
-        question = "What is Saudi Vision 2030?"
+        mock_llm_provider = MagicMock()
+        mock_llm_provider.generate.return_value = "Saudi Vision 2030 is a strategic framework."
+        mock_llm_factory.get_provider.return_value = mock_llm_provider
 
-        response = rag.ask(
-            question=question,
-            knowledge_base_id=5,
-        )
+        rag = RAGService(mock_db)
+        resp = rag.ask(question="What is Saudi Vision 2030?", knowledge_base_id=5)
 
-        print("=" * 80)
-        print("QUESTION")
-        print("=" * 80)
-        print(question)
-
-        print("\n")
-
-        print("=" * 80)
-        print("ANSWER")
-        print("=" * 80)
-        print(response["answer"])
-
-        print("\n")
-
-        print("=" * 80)
-        print("SOURCES")
-        print("=" * 80)
-
-        for index, source in enumerate(response["sources"], start=1):
-
-            print(f"\nSource {index}")
-
-            print(f"Score              : {source['score']:.4f}")
-
-            print(f"Chunk UUID         : {source['chunk_uuid']}")
-
-            print(
-                f"Parsed Document ID : {source['parsed_document_id']}"
-            )
-
-    finally:
-
-        db.close()
-
-
-if __name__ == "__main__":
-    main()
+        assert resp["answer"] == "Saudi Vision 2030 is a strategic framework."
+        assert len(resp["sources"]) == 1
+        assert resp["sources"][0]["chunk_uuid"] == "chunk-1"

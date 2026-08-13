@@ -139,4 +139,5 @@ class AccountLockoutLimiter:
 login_limiter = RedisRateLimiter(limit=5, window_seconds=15 * 60, name="login")
 register_limiter = RedisRateLimiter(limit=3, window_seconds=60 * 60, name="register")
 forgot_password_limiter = RedisRateLimiter(limit=3, window_seconds=60 * 60, name="forgot_password")
+reset_password_limiter = RedisRateLimiter(limit=5, window_seconds=15 * 60, name="reset_password")
 api_limiter = RedisRateLimiter(limit=100, window_seconds=60, name="api")

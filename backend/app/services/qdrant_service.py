@@ -110,6 +110,7 @@ class QdrantService:
         chunks,
         embeddings: List[List[float]],
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
     ):
         if knowledge_base_id is None:
             raise ValueError("knowledge_base_id must be explicitly provided to QdrantService.upsert_chunks")
@@ -117,19 +118,23 @@ class QdrantService:
         points = []
 
         for chunk, embedding in zip(chunks, embeddings):
+            payload = {
+                "chunk_uuid": str(chunk.uuid),
+                "parsed_document_id": chunk.parsed_document_id,
+                "knowledge_base_id": int(knowledge_base_id),
+                "chunk_index": chunk.chunk_index,
+                "text": chunk.chunk_text,
+                "char_count": chunk.char_count,
+                "estimated_tokens": chunk.estimated_tokens,
+            }
+            if organization_id is not None:
+                payload["organization_id"] = int(organization_id)
+
             points.append(
                 PointStruct(
                     id=chunk.id,
                     vector=embedding,
-                    payload={
-                        "chunk_uuid": str(chunk.uuid),
-                        "parsed_document_id": chunk.parsed_document_id,
-                        "knowledge_base_id": int(knowledge_base_id),
-                        "chunk_index": chunk.chunk_index,
-                        "text": chunk.chunk_text,
-                        "char_count": chunk.char_count,
-                        "estimated_tokens": chunk.estimated_tokens,
-                    },
+                    payload=payload,
                 )
             )
 
@@ -139,7 +144,7 @@ class QdrantService:
         )
 
         logger.info(
-            f"{len(points)} vectors indexed into Qdrant for Knowledge Base {knowledge_base_id}."
+            f"{len(points)} vectors indexed into Qdrant for KB {knowledge_base_id} (Org: {organization_id})."
         )
 
     # --------------------------------------------------
@@ -151,6 +156,7 @@ class QdrantService:
         query: Optional[str] = None,
         query_vector: Optional[List[float]] = None,
         knowledge_base_id: Optional[int] = None,
+        organization_id: Optional[int] = None,
         limit: Optional[int] = None,
     ):
 
@@ -162,16 +168,23 @@ class QdrantService:
         if limit is None:
             limit = settings.TOP_K_RESULTS
 
-        query_filter = None
-        if knowledge_base_id is not None:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="knowledge_base_id",
-                        match=MatchValue(value=knowledge_base_id),
-                    )
-                ]
+        must_conditions = []
+        if organization_id is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="organization_id",
+                    match=MatchValue(value=organization_id),
+                )
             )
+        if knowledge_base_id is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="knowledge_base_id",
+                    match=MatchValue(value=knowledge_base_id),
+                )
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
 
         response = self.client.query_points(
             collection_name=self.collection_name,

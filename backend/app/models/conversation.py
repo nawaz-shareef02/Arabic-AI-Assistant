@@ -10,6 +10,7 @@ from app.database.base import Base
 
 if TYPE_CHECKING:
     from app.models.user import User
+    from app.models.organization import Organization
     from app.models.knowledge_base import KnowledgeBase
     from app.models.message import Message
 
@@ -59,6 +60,13 @@ class Conversation(Base):
     )
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        default=1,
+        server_default="1",
+        nullable=False,
+        index=True,
+    )
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
@@ -99,6 +107,11 @@ class Conversation(Base):
     )
 
     # ── Relationships ────────────────────────────────────────────────────────
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        back_populates="conversations",
+        foreign_keys=[organization_id],
+    )
     user: Mapped["User"] = relationship(
         back_populates="conversations",
         foreign_keys=[user_id],

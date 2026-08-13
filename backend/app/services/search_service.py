@@ -98,17 +98,16 @@ class SearchService:
         self,
         query: str,
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
         top_k: int = 5,
     ):
         """
-        Original semantic search — returns raw Qdrant ScoredPoint objects.
-
-        Preserved unchanged for backward compatibility with any consumer
-        that relies on the Qdrant result format.
+        Original semantic search — returns raw Qdrant ScoredPoint objects with organization scoping.
         """
         results = self.qdrant_service.search(
             query=query,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             limit=top_k,
         )
 
@@ -218,6 +217,7 @@ class SearchService:
         self,
         query: str,
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
         expanded_query: Optional[str] = None,
         top_k: Optional[int] = None,
         language: Optional[str] = None,
@@ -235,7 +235,7 @@ class SearchService:
 
         # ── Dense Vector Search ──────────────────────────────────────────
         dense_results = self._dense_search(
-            query, knowledge_base_id, top_k, profiler=p
+            query, knowledge_base_id, top_k, profiler=p, organization_id=organization_id
         )
         if p:
             p.set("dense_results", len(dense_results))
@@ -298,16 +298,12 @@ class SearchService:
         knowledge_base_id: int,
         top_k: int,
         profiler: Optional[object] = None,
+        organization_id: Optional[int] = None,
     ) -> List[SearchResult]:
-        """
-        Dense vector search via Qdrant, converted to SearchResult format.
-
-        Splits embedding and Qdrant query into separate profiler stages
-        when a profiler is provided.
-        """
+        """Dense vector retrieval via Qdrant."""
         p = profiler
 
-        # ── Embedding ────────────────────────────────────────────────────
+        # ── Embed query ──────────────────────────────────────────────────
         if p:
             p.start("embedding")
         query_vector = self.embedding_service.embed_text(query)
@@ -321,6 +317,7 @@ class SearchService:
             qdrant_results = self.qdrant_service.search(
                 query_vector=query_vector,
                 knowledge_base_id=knowledge_base_id,
+                organization_id=organization_id,
                 limit=top_k,
             )
         except Exception as exc:

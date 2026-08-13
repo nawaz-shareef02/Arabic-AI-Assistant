@@ -1,23 +1,18 @@
+import pytest
 from app.services.chunk_service import ChunkService
 
-sample_text = (
-    "Artificial Intelligence is transforming enterprise software. "
-    * 200
-)
 
-service = ChunkService()
-
-chunks = service.split_text(sample_text)
-
-print(f"Total Chunks : {len(chunks)}")
-
-for chunk in chunks:
-    print(
-        f"""
-Chunk {chunk["chunk_index"]}
-Characters : {chunk["char_count"]}
-Tokens : {chunk["estimated_tokens"]}
-Start : {chunk["start_offset"]}
-End : {chunk["end_offset"]}
-"""
+def test_chunk_splitting():
+    """Test ChunkService splits text into expected chunks."""
+    sample_text = (
+        "Artificial Intelligence is transforming enterprise software. "
+        * 50
     )
+    service = ChunkService()
+    chunks = service.split_text(sample_text)
+
+    assert len(chunks) > 0
+    first_chunk = chunks[0]
+    assert "chunk_index" in first_chunk
+    assert "chunk_text" in first_chunk
+    assert first_chunk["char_count"] > 0

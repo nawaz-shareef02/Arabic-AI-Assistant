@@ -51,3 +51,17 @@ class UserResponse(BaseModel):
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr = Field(..., description="Email address for password recovery")
 
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=1, max_length=512, description="Password reset token received via email")
+    new_password: str = Field(..., min_length=8, description="New user password (minimum 8 characters)")
+
+    @model_validator(mode="after")
+    def check_password_strength(self) -> "ResetPasswordRequest":
+        from app.core.security import validate_password_strength
+        try:
+            validate_password_strength(self.new_password, "user@reset.com", "User")
+        except ValueError as e:
+            raise ValueError(str(e))
+        return self
+

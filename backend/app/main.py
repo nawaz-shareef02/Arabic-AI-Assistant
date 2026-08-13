@@ -217,7 +217,7 @@ async def add_security_headers_middleware(request: Request, call_next):
     response.headers["X-DNS-Prefetch-Control"] = "off"
 
     # Cache-Control for authenticated pages
-    is_public_api = "/auth/login" in path or "/auth/register" in path or "/auth/forgot-password" in path or "/health" in path or path == "/"
+    is_public_api = "/auth/login" in path or "/auth/register" in path or "/auth/forgot-password" in path or "/auth/reset-password" in path or "/health" in path or path == "/"
     if not is_public_api and path.startswith("/api/v1/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"

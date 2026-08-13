@@ -215,12 +215,16 @@ def test_document_processing_lifecycle(db):
     db.commit()
     db.refresh(doc)
     
-    service = DocumentService(db)
+    from app.tasks.indexing_tasks import process_document_async
     
     # Run pipeline process synchronously using a mock SessionLocal to point to our in-memory SQLite DB
-    with patch("app.database.session.SessionLocal", return_value=db):
+    with patch("app.tasks.indexing_tasks.SessionLocal", return_value=db):
         with patch.object(db, "close", return_value=None):
-            service.process_document(doc.uuid, user.id)
+            with patch("app.tasks.indexing_tasks.IndexingService") as mock_indexing:
+                mock_indexing.return_value.index_document.return_value = 1
+                with patch("app.tasks.indexing_tasks.run_intelligence_pipeline") as mock_intel:
+                    mock_intel.delay = MagicMock()
+                    process_document_async.run(document_id=doc.id, knowledge_base_id=kb.id)
         
     db.refresh(doc)
     assert doc.status == "Parsed"

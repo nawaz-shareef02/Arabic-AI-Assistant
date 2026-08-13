@@ -34,12 +34,19 @@ class ConversationRepository:
         *,
         user_id: int,
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
         title: Optional[str] = None,
     ) -> Conversation:
         """Create and persist a new conversation."""
+        if organization_id is None:
+            from app.models.knowledge_base import KnowledgeBase
+            kb = self.db.get(KnowledgeBase, knowledge_base_id)
+            organization_id = kb.organization_id if (kb and kb.organization_id) else 1
+
         conv = Conversation(
             user_id=user_id,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             title=title,
             status=ConversationStatus.ACTIVE.value,
         )
@@ -102,14 +109,17 @@ class ConversationRepository:
         return self.db.get(Conversation, conversation_id)
 
     def get_by_id_and_user(
-        self, conversation_id: int, user_id: int
+        self, conversation_id: int, user_id: int, organization_id: Optional[int] = None
     ) -> Optional[Conversation]:
-        """Fetch only if the conversation belongs to the authenticated user."""
+        """Fetch only if the conversation belongs to the authenticated user and organization."""
         stmt = select(Conversation).where(
             Conversation.id == conversation_id,
-            Conversation.user_id == user_id,
             Conversation.status != ConversationStatus.DELETED.value,
         )
+        if organization_id is not None:
+            stmt = stmt.where(Conversation.organization_id == organization_id)
+        else:
+            stmt = stmt.where(Conversation.user_id == user_id)
         return self.db.scalars(stmt).first()
 
     def list_by_user(

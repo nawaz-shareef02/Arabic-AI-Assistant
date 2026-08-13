@@ -6,10 +6,24 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_db, get_current_user
 from app.models.user import User
-from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, UserResponse, ForgotPasswordRequest
+from app.schemas.auth import (
+    RegisterRequest,
+    LoginRequest,
+    TokenResponse,
+    UserResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+)
 from app.services.auth_service import AuthService
 from app.services.session_service import SessionService
-from app.core.rate_limit import login_limiter, register_limiter, forgot_password_limiter, AccountLockoutLimiter
+from app.services.password_reset_service import PasswordResetService
+from app.core.rate_limit import (
+    login_limiter,
+    register_limiter,
+    forgot_password_limiter,
+    reset_password_limiter,
+    AccountLockoutLimiter,
+)
 
 logger = logging.getLogger("app.api.v1.auth")
 router = APIRouter(prefix="/auth", tags=["AUTH"])
@@ -141,23 +155,55 @@ def list_active_sessions(
 
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
-def forgot_password(request: ForgotPasswordRequest, fastapi_req: Request, db: Session = Depends(get_db)):
+def forgot_password(
+    request: ForgotPasswordRequest,
+    fastapi_req: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Request password reset email.
+    Enumeration-protected: returns identical success response regardless of email existence.
+    """
     client_ip = get_client_ip(fastapi_req)
     if forgot_password_limiter.is_rate_limited(client_ip):
-        logger.warning(f"AUDIT | Action: rate_limit_exceeded | Key: {client_ip} | Limiter: forgot_password | Status: blocked")
+        logger.warning(
+            f"AUDIT | Action: rate_limit_exceeded | Key: {client_ip} | "
+            f"Limiter: forgot_password | Status: blocked"
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             headers={"Retry-After": str(forgot_password_limiter.get_retry_after(client_ip))},
-            detail="Too many password reset requests. Please try again in an hour."
+            detail="Too many password reset requests. Please try again in an hour.",
         )
 
-    user = db.query(User).filter(User.email == request.email).first()
-    if not user:
-        logger.warning(f"AUDIT | Action: forgot_password_failed | User: {request.email} | IP: {client_ip} | Reason: Email not found")
-        return {"detail": "If this email is registered, a password reset link has been sent."}
+    reset_svc = PasswordResetService(db)
+    return reset_svc.request_password_reset(request.email, client_ip)
 
-    logger.info(f"AUDIT | Action: forgot_password_requested | User: {request.email} | IP: {client_ip} | Status: success")
-    return {"detail": "If this email is registered, a password reset link has been sent."}
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+def reset_password(
+    request: ResetPasswordRequest,
+    fastapi_req: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Reset user password using token from email.
+    Validates token single-use status, expiration, and updates password.
+    """
+    client_ip = get_client_ip(fastapi_req)
+    if reset_password_limiter.is_rate_limited(client_ip):
+        logger.warning(
+            f"AUDIT | Action: rate_limit_exceeded | Key: {client_ip} | "
+            f"Limiter: reset_password | Status: blocked"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(reset_password_limiter.get_retry_after(client_ip))},
+            detail="Too many password reset attempts. Please try again in 15 minutes.",
+        )
+
+    reset_svc = PasswordResetService(db)
+    return reset_svc.reset_password(request.token, request.new_password, client_ip)
 
 
 @router.get("/me", response_model=UserResponse, status_code=status.HTTP_200_OK)

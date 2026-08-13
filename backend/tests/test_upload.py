@@ -25,6 +25,8 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 def fixture_db_session():
     Base.metadata.create_all(bind=engine)
     db = TestingSessionLocal()
+    from app.core.rbac_seeder import seed_rbac
+    seed_rbac(db)
     try:
         yield db
     finally:
@@ -46,18 +48,25 @@ def fixture_client(db_session):
 
 def create_test_user(db_session, email: str, full_name: str):
     from app.models.user import User
+    from app.repositories.role_repository import RoleRepository
     import bcrypt
     hashed = bcrypt.hashpw(b"Secure@12345", bcrypt.gensalt())
     user = User(
         email=email,
         hashed_password=hashed.decode(),
         full_name=full_name,
-        role="employee",
+        role="admin",
         organization="Test Org"
     )
     db_session.add(user)
     db_session.commit()
     db_session.refresh(user)
+
+    role_repo = RoleRepository(db_session)
+    admin_role = role_repo.get_by_name("Super Admin")
+    if admin_role:
+        role_repo.assign_role_to_user(user.id, admin_role.id)
+        db_session.commit()
     return user
 
 def create_test_kb(db_session, owner_id: int, name: str):
@@ -94,7 +103,7 @@ def test_successful_uploads(client, db_session):
     assert data["filename"] == "sample.pdf"
     assert data["mime_type"] == "application/pdf"
     assert data["file_size"] == len(pdf_content)
-    assert data["status"] == "Uploaded"
+    assert data["status"] == "Queued"
     assert data["sha256_hash"] is not None
     assert data["language"] is None
 

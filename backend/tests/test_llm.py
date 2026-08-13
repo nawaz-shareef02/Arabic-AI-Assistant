@@ -1,9 +1,10 @@
+import pytest
 from app.services.llm import LLMFactory
 
-provider = LLMFactory.get_provider()
 
-print("=" * 60)
-
-print("Provider:", type(provider).__name__)
-
-print("Health:", provider.health_check())
+def test_llm_factory():
+    """Test LLMFactory resolves the configured provider implementing BaseLLMProvider."""
+    provider = LLMFactory.get_provider()
+    assert provider is not None
+    assert hasattr(provider, "generate")
+    assert hasattr(provider, "health_check")

@@ -201,8 +201,15 @@ export const AuthService = {
   },
 
   async forgotPassword(email: string): Promise<void> {
-    // Mock password recovery endpoint trigger
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    console.log(`Password reset link requested for: ${email}`);
+    await api.post("/auth/forgot-password", {
+      email: email.toLowerCase().trim()
+    });
+  },
+
+  async resetPassword(token: string, newPassword: string): Promise<void> {
+    await api.post("/auth/reset-password", {
+      token: token.trim(),
+      new_password: newPassword
+    });
   }
 };

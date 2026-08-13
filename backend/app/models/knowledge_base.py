@@ -7,6 +7,7 @@ from app.database.base import Base
 
 if TYPE_CHECKING:
     from app.models.user import User
+    from app.models.organization import Organization
     from app.models.document import Document
     from app.models.conversation import Conversation
 
@@ -23,6 +24,13 @@ class KnowledgeBase(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        default=1,
+        server_default="1",
+        index=True,
+        nullable=False
+    )
     owner_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False
@@ -49,6 +57,11 @@ class KnowledgeBase(Base):
     )
 
     # Relationships
+    organization: Mapped["Organization"] = relationship(
+        "Organization",
+        back_populates="knowledge_bases",
+        foreign_keys=[organization_id],
+    )
     owner: Mapped["User"] = relationship(
         back_populates="knowledge_bases",
         foreign_keys=[owner_id]

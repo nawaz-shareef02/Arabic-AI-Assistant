@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from app.models.conversation import Conversation
     from app.models.organization import OrganizationMember
     from app.models.role import UserRole
+    from app.models.password_reset_token import PasswordResetToken
 
 class User(Base):
     __tablename__ = "users"
@@ -61,5 +62,8 @@ class User(Base):
     )
     role_assignments: Mapped[List["UserRole"]] = relationship(
         "UserRole", back_populates="user", cascade="all, delete-orphan"
+    )
+    password_reset_tokens: Mapped[List["PasswordResetToken"]] = relationship(
+        "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
     )
 

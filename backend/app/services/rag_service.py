@@ -36,6 +36,7 @@ Performance:
 """
 
 import logging
+from typing import Optional, List, Dict, Generator, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -123,6 +124,7 @@ class RAGService:
         self,
         question: str,
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
     ) -> dict:
 
         profiler = RetrievalProfiler()
@@ -137,6 +139,7 @@ class RAGService:
         results = self.search_service.hybrid_search(
             query=question,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             expanded_query=expanded,
             profiler=profiler,
         )
@@ -184,6 +187,7 @@ class RAGService:
         self,
         question: str,
         knowledge_base_id: int,
+        organization_id: Optional[int] = None,
     ):
         profiler = RetrievalProfiler()
         logger.info("Starting RAG pipeline (streaming, hybrid)...")
@@ -197,6 +201,7 @@ class RAGService:
         results = self.search_service.hybrid_search(
             query=question,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             expanded_query=expanded,
             profiler=profiler,
         )
@@ -248,22 +253,10 @@ class RAGService:
         knowledge_base_id: int,
         conversation_id: int,
         user_id: int,
+        organization_id: Optional[int] = None,
     ) -> dict:
         """
         Conversational RAG pipeline (non-streaming).
-
-        Pipeline
-        --------
-        1. Save user message
-        2. Retrieve history within token budget
-        3. Rewrite follow-up question (QueryRewriterService)
-        4. Query expansion (Sprint 12)
-        5. Hybrid search (Sprint 12)
-        6. Optional re-ranking (Sprint 12)
-        7. Build prompt with history + context
-        8. Generate answer
-        9. Save assistant message
-        10. Return response with sources
         """
         profiler = RetrievalProfiler()
 
@@ -295,6 +288,7 @@ class RAGService:
         results = self.search_service.hybrid_search(
             query=rewritten,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             expanded_query=expanded,
             profiler=profiler,
         )
@@ -358,6 +352,7 @@ class RAGService:
         knowledge_base_id: int,
         conversation_id: int,
         user_id: int,
+        organization_id: Optional[int] = None,
     ):
         """
         Conversational RAG pipeline (streaming).

@@ -130,6 +130,21 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
 
     # --------------------------------------------------
+    # SMTP / Email & Password Reset Configuration
+    # --------------------------------------------------
+
+    SMTP_HOST: str = "localhost"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "noreply@arabiq.sa"
+    SMTP_FROM_NAME: str = "ArabIQ Security"
+    SMTP_USE_TLS: bool = True
+
+    FRONTEND_URL: str = "http://localhost:3000"
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
+
+    # --------------------------------------------------
     # CORS
     # --------------------------------------------------
 

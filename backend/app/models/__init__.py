@@ -18,6 +18,7 @@ from app.models.audit_log import AuditLog
 from app.models.user_session import UserSession
 from app.models.ai_benchmark_run import AIBenchmarkRun
 from app.models.backup_record import BackupRecord
+from app.models.password_reset_token import PasswordResetToken
 
 __all__ = [
     "User",
@@ -43,4 +44,5 @@ __all__ = [
     "UserSession",
     "AIBenchmarkRun",
     "BackupRecord",
+    "PasswordResetToken",
 ]

@@ -1,28 +1,25 @@
+import pytest
+import numpy as np
+from unittest.mock import MagicMock, patch
 from app.services.embedding_service import EmbeddingService
 
 
-service = EmbeddingService()
+def test_embedding_service():
+    """Test EmbeddingService embed_text and embed_batch with mocked model."""
+    mock_model = MagicMock()
+    mock_model.encode.side_effect = lambda texts, **kw: (
+        np.array([0.1] * 384) if isinstance(texts, str)
+        else np.array([[0.1] * 384 for _ in texts])
+    )
+    mock_model.get_embedding_dimension.return_value = 384
 
-print("=" * 50)
+    with patch.object(EmbeddingService, "_model", mock_model):
+        service = EmbeddingService()
+        assert service.is_loaded() is True
+        assert service.get_dimension() == 384
 
-print("Model Loaded :", service.is_loaded())
+        vec = service.embed_text("ArabIQ test")
+        assert len(vec) == 384
 
-print("Embedding Dimension :", service.get_dimension())
-
-vector = service.embed_text(
-    "ArabIQ is an enterprise AI platform."
-)
-
-print("Vector Length :", len(vector))
-
-batch = service.embed_batch(
-    [
-        "Artificial Intelligence",
-        "Arabic NLP",
-        "Enterprise Search",
-    ]
-)
-
-print("Batch Size :", len(batch))
-
-print("=" * 50)
+        batch = service.embed_batch(["AI", "NLP"])
+        assert len(batch) == 2

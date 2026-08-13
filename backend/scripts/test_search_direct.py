@@ -11,7 +11,7 @@ from app.services.indexing_service import IndexingService
 from app.services.qdrant_service import QdrantService
 from app.services.search_service import SearchService
 
-def test_qdrant_search_directly():
+def run_qdrant_search_directly():
     db = SessionLocal()
     try:
         # Find first existing parsed_document in DB
@@ -48,4 +48,4 @@ def test_qdrant_search_directly():
         db.close()
 
 if __name__ == "__main__":
-    test_qdrant_search_directly()
+    run_qdrant_search_directly()

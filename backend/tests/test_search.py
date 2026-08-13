@@ -1,25 +1,25 @@
+import pytest
+from unittest.mock import MagicMock, patch
 from app.services.search_service import SearchService
-from app.database.session import SessionLocal
 
-db = SessionLocal()
 
-service = SearchService(db)
+def test_semantic_search():
+    """Test SearchService.semantic_search with mocked vector search results."""
+    mock_db = MagicMock()
+    mock_point = MagicMock()
+    mock_point.id = 1
+    mock_point.score = 0.95
+    mock_point.payload = {"text": "Saudi Vision 2030 content", "chunk_uuid": "abc-123"}
 
-results = service.semantic_search(
-    query="What is the history of Saudi Vision 2030?",
-    knowledge_base_id=5,
-)
+    with patch("app.services.search_service.QdrantService") as mock_qdrant_cls:
+        mock_qdrant_svc = mock_qdrant_cls.return_value
+        mock_qdrant_svc.search.return_value = [mock_point]
 
-print("=" * 60)
+        service = SearchService(mock_db)
+        results = service.semantic_search(
+            query="What is Saudi Vision 2030?",
+            knowledge_base_id=5,
+        )
 
-print("Retrieved:", len(results), "Chunks")
-
-for index, item in enumerate(results, start=1):
-
-    print(f"\nResult {index}")
-
-    print("Score:", item.score)
-
-    print(item.payload["text"][:300])
-
-db.close()
+        assert len(results) == 1
+        assert results[0].score == 0.95
