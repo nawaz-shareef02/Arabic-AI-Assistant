@@ -20,6 +20,12 @@ from app.api.v1.knowledge_base import router as kb_router
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.models import router as models_router
 from app.api.v1.health import router as health_router
+from app.api.v1.roles import router as roles_router
+from app.api.v1.organizations import router as organizations_router
+from app.api.v1.workspaces import router as workspaces_router
+from app.api.v1.audit import router as audit_router
+from app.middleware.audit_middleware import AuditMiddleware
+from app.core.config_validator import validate_startup_configuration
 
 from app.core.config import settings
 
@@ -42,6 +48,8 @@ def startup_validation():
         logger.info("Test environment detected (pytest). Skipping strict startup configuration validation.")
         return
 
+    validate_startup_configuration()
+
     # Check SECRET_KEY
     if not settings.SECRET_KEY or settings.SECRET_KEY == "CHANGE_TO_A_RANDOM_SECRET" or len(settings.SECRET_KEY) < 32:
         logger.error("CRITICAL CONFIGURATION ERROR: SECRET_KEY is missing, default, or too weak (under 32 chars)!")
@@ -58,12 +66,14 @@ def startup_validation():
     try:
         from app.database.session import SessionLocal
         from sqlalchemy import text
+        from app.core.rbac_seeder import seed_rbac
         db = SessionLocal()
         db.execute(text("SELECT 1"))
+        seed_rbac(db)
         db.close()
-        logger.info("Database connectivity check passed.")
+        logger.info("Database connectivity check & RBAC seeding passed.")
     except Exception as e:
-        logger.critical(f"CRITICAL DATABASE ERROR: Could not connect to the database: {str(e)}")
+        logger.critical(f"CRITICAL DATABASE ERROR: Could not connect to the database or seed RBAC: {str(e)}")
         sys.exit(1)
 
     # Check Redis connectivity
@@ -256,7 +266,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(AuditMiddleware)
+
 # Include v1 Routers
+from app.api.v1.ai_performance import router as ai_performance_router
+from app.api.v1.backups import router as backups_router
+
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
@@ -267,7 +282,22 @@ app.include_router(upload_router, prefix="/api/v1")
 app.include_router(kb_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(models_router, prefix="/api/v1")
+app.include_router(health_router)
 app.include_router(health_router, prefix="/api/v1")
+app.include_router(roles_router, prefix="/api/v1")
+app.include_router(organizations_router, prefix="/api/v1")
+app.include_router(workspaces_router, prefix="/api/v1")
+app.include_router(audit_router, prefix="/api/v1")
+app.include_router(ai_performance_router, prefix="/api/v1")
+app.include_router(backups_router, prefix="/api/v1")
+
+from app.core.prometheus_exporter import get_prometheus_metrics_text, CONTENT_TYPE_LATEST
+from fastapi import Response
+
+@app.get("/metrics", summary="Prometheus Metrics Endpoint", include_in_schema=False)
+def metrics():
+    """Exposes standard Prometheus metrics format."""
+    return Response(content=get_prometheus_metrics_text(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/")
 def root():

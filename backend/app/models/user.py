@@ -8,6 +8,8 @@ from app.database.base import Base
 if TYPE_CHECKING:
     from app.models.knowledge_base import KnowledgeBase
     from app.models.conversation import Conversation
+    from app.models.organization import OrganizationMember
+    from app.models.role import UserRole
 
 class User(Base):
     __tablename__ = "users"
@@ -53,5 +55,11 @@ class User(Base):
         back_populates="user",
         foreign_keys="[Conversation.user_id]",
         cascade="all, delete-orphan",
+    )
+    organization_memberships: Mapped[List["OrganizationMember"]] = relationship(
+        "OrganizationMember", back_populates="user", cascade="all, delete-orphan"
+    )
+    role_assignments: Mapped[List["UserRole"]] = relationship(
+        "UserRole", back_populates="user", cascade="all, delete-orphan"
     )
 

@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     # --------------------------------------------------
 
     REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
     # --------------------------------------------------
     # Qdrant Configuration
@@ -98,6 +100,28 @@ class Settings(BaseSettings):
 
     # Maximum words in a generated conversation title.
     CONV_TITLE_MAX_WORDS: int = 5
+
+    # --------------------------------------------------
+    # Sprint 12 — Hybrid Retrieval Configuration
+    # --------------------------------------------------
+
+    # Toggle query expansion (adds synonyms/translations to retrieval query).
+    ENABLE_QUERY_EXPANSION: bool = True
+    # Toggle retrieval debug logging (chunk-level scores, ranks, metadata).
+    ENABLE_RETRIEVAL_DEBUG: bool = False
+    # Toggle metadata filtering (language, document type, etc.) during retrieval.
+    ENABLE_METADATA_FILTERING: bool = True
+    # Toggle re-ranker (NoOp by default; enable when a real reranker is configured).
+    ENABLE_RERANKER: bool = False
+
+    # Maximum results from hybrid search (before re-ranking).
+    HYBRID_MAX_RESULTS: int = 10
+    # Maximum results after re-ranking (fed to the prompt builder).
+    RERANK_MAX_RESULTS: int = 5
+    # Redis TTL (seconds) for cached query expansions.
+    QUERY_EXPANSION_CACHE_TTL: int = 3600
+    # Reciprocal Rank Fusion constant (standard default is 60).
+    RRF_K: int = 60
 
     # --------------------------------------------------
     # Upload Configuration

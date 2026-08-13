@@ -126,9 +126,8 @@ class QueryRewriterService:
         - Contains common referential terms in English or Arabic
         """
         words = question.strip().split()
-        if len(words) <= 6:
-            return True
-
+        if not words:
+            return False
         referential_triggers = {
             # English
             "it", "this", "that", "they", "them", "its", "their",

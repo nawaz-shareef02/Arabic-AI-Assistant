@@ -207,6 +207,16 @@ class DocumentService:
             
             db.commit()
             db.refresh(doc)
+
+            # 9. Trigger Asynchronous Intelligence Pipeline (Non-blocking)
+            from app.tasks.intelligence_tasks import run_async_document_intelligence
+            import threading
+            threading.Thread(
+                target=run_async_document_intelligence,
+                args=(doc.id,),
+                daemon=True
+            ).start()
+
             success = True
             
         except DocumentParsingError as e:

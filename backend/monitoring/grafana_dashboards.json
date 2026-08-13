@@ -1,0 +1,27 @@
+{
+  "dashboards": [
+    {
+      "title": "ArabIQ - System & API Performance Dashboard",
+      "panels": [
+        { "title": "HTTP Throughput (req/sec)", "type": "graph", "targets": [{ "expr": "rate(arabiq_http_requests_total[1m])" }] },
+        { "title": "API Latency p95 (s)", "type": "graph", "targets": [{ "expr": "histogram_quantile(0.95, rate(arabiq_http_request_duration_seconds_bucket[5m]))" }] },
+        { "title": "Active DB Connections", "type": "stat", "targets": [{ "expr": "arabiq_db_active_connections" }] }
+      ]
+    },
+    {
+      "title": "ArabIQ - AI Performance & Quality Dashboard",
+      "panels": [
+        { "title": "RAG Sub-Stage Duration (p95)", "type": "graph", "targets": [{ "expr": "histogram_quantile(0.95, sum(rate(arabiq_ai_stage_duration_seconds_bucket[5m])) by (le, stage))" }] },
+        { "title": "Retrieved Document Count", "type": "histogram", "targets": [{ "expr": "arabiq_ai_retrieval_result_count" }] }
+      ]
+    },
+    {
+      "title": "ArabIQ - Enterprise Security Dashboard",
+      "panels": [
+        { "title": "Failed Logins", "type": "counter", "targets": [{ "expr": "arabiq_security_failed_logins_total" }] },
+        { "title": "Prompt Injection Detections", "type": "counter", "targets": [{ "expr": "arabiq_security_prompt_injections_total" }] },
+        { "title": "Rate Limit Hits", "type": "counter", "targets": [{ "expr": "arabiq_security_rate_limit_hits_total" }] }
+      ]
+    }
+  ]
+}

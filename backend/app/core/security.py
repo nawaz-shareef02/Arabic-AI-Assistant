@@ -18,13 +18,24 @@ def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
 
-def create_access_token(subject: Union[str, Any], expires_delta: timedelta = None) -> str:
+def create_access_token(
+    subject: Union[str, Any],
+    expires_delta: timedelta = None,
+    additional_claims: dict = None
+) -> str:
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
-    
-    to_encode = {"exp": expire, "sub": str(subject)}
+
+    to_encode = {
+        "exp": expire,
+        "sub": str(subject),
+        "token_version": 1.0,
+    }
+    if additional_claims:
+        to_encode.update(additional_claims)
+
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
     return encoded_jwt
 

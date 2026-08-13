@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status, Response, File, UploadFile, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db, get_current_user
+from app.core.dependencies import get_db, get_current_user, require_permission
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse
 from app.services.document_service import DocumentService
@@ -16,7 +16,7 @@ async def upload_document(
     file: UploadFile = File(...),
     knowledge_base_uuid: py_uuid.UUID = Form(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("documents.upload"))
 ):
     service = DocumentService(db)
     db_doc = await service.upload_document(file, kb_uuid=knowledge_base_uuid, creator_id=current_user.id)
@@ -82,3 +82,83 @@ def delete_document(
     service = DocumentService(db)
     service.delete_doc(uuid, owner_id=current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{uuid}/metadata", status_code=status.HTTP_200_OK)
+def get_document_metadata(
+    uuid: py_uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = DocumentService(db)
+    doc = service.get_doc(uuid, owner_id=current_user.id)
+
+    from app.models.document_metadata import DocumentMetadata
+    from app.models.document_entity import DocumentEntity
+
+    meta = db.query(DocumentMetadata).filter(DocumentMetadata.document_id == doc.id).first()
+    entities = db.query(DocumentEntity).filter(DocumentEntity.document_id == doc.id).all()
+
+    return {
+        "document_uuid": str(doc.uuid),
+        "filename": doc.filename,
+        "classification": doc.classification or "Technical Documentation",
+        "title": meta.title if meta else doc.filename,
+        "author": meta.author if meta else "Internal User",
+        "summary": meta.summary if meta else "",
+        "keywords": meta.keywords if meta else [],
+        "topics": meta.topics if meta else [],
+        "entities": [
+            {"text": e.entity_text, "type": e.entity_type, "language": e.language}
+            for e in entities
+        ],
+    }
+
+
+@router.get("/{uuid}/relationships", status_code=status.HTTP_200_OK)
+def get_document_relationships(
+    uuid: py_uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = DocumentService(db)
+    doc = service.get_doc(uuid, owner_id=current_user.id)
+
+    from app.services.knowledge_graph_service import KnowledgeGraphService
+    kg_service = KnowledgeGraphService(db)
+    graph = kg_service.get_document_subgraph(doc.id)
+    return graph
+
+
+@router.get("/{uuid}/insights", status_code=status.HTTP_200_OK)
+def get_document_insights(
+    uuid: py_uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = DocumentService(db)
+    doc = service.get_doc(uuid, owner_id=current_user.id)
+
+    from app.models.document_metadata import DocumentMetadata
+    from app.models.document_entity import DocumentEntity
+    from app.services.knowledge_graph_service import KnowledgeGraphService
+
+    meta = db.query(DocumentMetadata).filter(DocumentMetadata.document_id == doc.id).first()
+    entities = db.query(DocumentEntity).filter(DocumentEntity.document_id == doc.id).all()
+    kg_service = KnowledgeGraphService(db)
+    graph = kg_service.get_document_subgraph(doc.id)
+
+    return {
+        "document_uuid": str(doc.uuid),
+        "filename": doc.filename,
+        "classification": doc.classification or "Technical Documentation",
+        "summary": meta.summary if meta else "",
+        "keywords": meta.keywords if meta else [],
+        "topics": meta.topics if meta else [],
+        "entities": [
+            {"text": e.entity_text, "type": e.entity_type, "language": e.language}
+            for e in entities
+        ],
+        "relationships": graph["edges"],
+        "connected_documents": graph["nodes"],
+    }

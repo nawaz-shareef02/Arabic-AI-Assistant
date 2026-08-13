@@ -9,6 +9,9 @@ interface AuthContextType {
   currentUser: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  permissions: string[];
+  roles: string[];
+  hasPermission: (perm: string) => boolean;
   login: (request: LoginRequest) => Promise<void>;
   register: (request: RegisterRequest) => Promise<void>;
   logout: () => Promise<void>;
@@ -93,12 +96,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     AuthService.updateLocalSessionUser(user);
   };
 
+  const hasPermission = (perm: string): boolean => {
+    if (!currentUser) return false;
+    const isSuperAdmin = currentUser.role === "admin" || currentUser.role === "Super Admin";
+    if (isSuperAdmin) return true;
+    return currentUser.permissions?.includes(perm) || false;
+  };
+
   return (
     <AuthContext.Provider
       value={{
         currentUser,
         isAuthenticated: !!currentUser,
         isLoading,
+        permissions: currentUser?.permissions || [],
+        roles: currentUser?.roles || [],
+        hasPermission,
         login,
         register,
         logout,

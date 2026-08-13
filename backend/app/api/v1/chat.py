@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, require_permission
 from app.database.session import SessionLocal
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.rag_service import RAGService

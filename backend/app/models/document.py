@@ -8,6 +8,9 @@ from app.database.base import Base
 if TYPE_CHECKING:
     from app.models.knowledge_base import KnowledgeBase
     from app.models.parsed_document import ParsedDocument
+    from app.models.document_metadata import DocumentMetadata
+    from app.models.document_entity import DocumentEntity
+    from app.models.document_relationship import DocumentRelationship
 
 class Document(Base):
     __tablename__ = "documents"
@@ -41,6 +44,7 @@ class Document(Base):
     file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[Optional[str]] = mapped_column(String(500), default=None, nullable=True)
+    classification: Mapped[Optional[str]] = mapped_column(String(100), default="Technical Documentation", nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -58,6 +62,29 @@ class Document(Base):
     parsed_document: Mapped[Optional["ParsedDocument"]] = relationship(
         back_populates="document",
         uselist=False,
+        cascade="all, delete-orphan"
+    )
+    metadata_record: Mapped[Optional["DocumentMetadata"]] = relationship(
+        "DocumentMetadata",
+        back_populates="document",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+    entities: Mapped[list["DocumentEntity"]] = relationship(
+        "DocumentEntity",
+        back_populates="document",
+        cascade="all, delete-orphan"
+    )
+    outgoing_relationships: Mapped[list["DocumentRelationship"]] = relationship(
+        "DocumentRelationship",
+        foreign_keys="[DocumentRelationship.source_document_id]",
+        back_populates="source_document",
+        cascade="all, delete-orphan"
+    )
+    incoming_relationships: Mapped[list["DocumentRelationship"]] = relationship(
+        "DocumentRelationship",
+        foreign_keys="[DocumentRelationship.target_document_id]",
+        back_populates="target_document",
         cascade="all, delete-orphan"
     )
 

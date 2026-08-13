@@ -1,0 +1,47 @@
+groups:
+  - name: arabiq_alerts
+    rules:
+      - alert: DatabaseOffline
+        expr: arabiq_db_active_connections == 0
+        for: 1m
+        labels:
+          severity: CRITICAL
+        annotations:
+          summary: "PostgreSQL Database is Offline"
+          description: "PostgreSQL database connection pool has 0 active connections."
+
+      - alert: RedisOffline
+        expr: arabiq_redis_connected_clients == 0
+        for: 2m
+        labels:
+          severity: WARNING
+        annotations:
+          summary: "Redis Cache is Offline"
+          description: "Redis server is unreachable. Rate limiting falling back to in-memory."
+
+      - alert: HighErrorRate
+        expr: rate(arabiq_http_requests_total{status=~"5.."}[5m]) / rate(arabiq_http_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: CRITICAL
+        annotations:
+          summary: "High HTTP 5xx Error Rate Detected (> 5%)"
+          description: "HTTP 5xx server error rate exceeds 5% over 5 minutes."
+
+      - alert: PromptInjectionSpike
+        expr: rate(arabiq_security_prompt_injections_total[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: WARNING
+        annotations:
+          summary: "Prompt Injection Attack Spike Detected"
+          description: "Over 10 prompt injection attempts detected in 5 minutes."
+
+      - alert: SlowRAGRetrieval
+        expr: histogram_quantile(0.95, sum(rate(arabiq_ai_stage_duration_seconds_bucket[5m])) by (le)) > 2.0
+        for: 5m
+        labels:
+          severity: WARNING
+        annotations:
+          summary: "High RAG Retrieval Latency (p95 > 2s)"
+          description: "95th percentile RAG retrieval latency exceeds 2 seconds."

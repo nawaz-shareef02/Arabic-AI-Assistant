@@ -16,6 +16,7 @@ export interface DocumentItem {
   processingTime?: number;
   parserName?: string;
   errorDetail?: string;
+  classification?: string;
 }
 
 const formatBytes = (bytes: number, decimals = 2) => {
@@ -67,7 +68,8 @@ export const DocumentsService = {
           characters: doc.characters ?? undefined,
           processingTime: doc.processing_time ?? undefined,
           parserName: doc.parser_name ?? undefined,
-          errorDetail: doc.error_message ?? undefined
+          errorDetail: doc.error_message ?? undefined,
+          classification: doc.classification || "Technical Documentation"
         };
       });
     } catch (e) {
@@ -108,13 +110,24 @@ export const DocumentsService = {
       chunks: 0,
       lang: "EN",
       date: new Date(doc.created_at).toLocaleDateString(),
-      size: formatBytes(doc.file_size)
+      size: formatBytes(doc.file_size),
+      classification: doc.classification || "Technical Documentation"
     };
   },
 
   async deleteDocument(id: string): Promise<boolean> {
     await api.delete(`/documents/${id}`);
     return true;
+  },
+
+  async getDocumentInsights(id: string): Promise<any> {
+    try {
+      const res = await api.get(`/documents/${id}/insights`);
+      return res.data;
+    } catch (e) {
+      console.error(`Error fetching insights for doc ${id}`, e);
+      return null;
+    }
   },
 };
 

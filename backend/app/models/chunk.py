@@ -1,8 +1,8 @@
 from uuid import uuid4
 from datetime import datetime
 
-from sqlalchemy import Integer, Text, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, Integer, Text, DateTime, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -36,6 +36,11 @@ class DocumentChunk(Base):
     start_offset: Mapped[int] = mapped_column(Integer)
 
     end_offset: Mapped[int] = mapped_column(Integer)
+
+    # Sprint 12 — PostgreSQL Full-Text Search vector.
+    # Auto-populated via database trigger on INSERT/UPDATE of chunk_text.
+    # GIN-indexed for fast keyword retrieval.
+    search_vector = Column(TSVECTOR, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

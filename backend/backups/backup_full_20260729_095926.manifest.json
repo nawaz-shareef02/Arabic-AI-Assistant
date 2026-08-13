@@ -1,0 +1,18 @@
+{
+  "backup_id": "9b4fbd84-4ef9-4bb5-a68c-3730cce2a82e",
+  "backup_version": "1.0.0",
+  "backup_type": "Full",
+  "target": "All",
+  "creation_time": "2026-07-29T04:29:26.441039+00:00",
+  "encryption_algorithm": "AES-256",
+  "checksum_sha256": "2adb8ac5a231c919fbd1b421833b6fb4c2abfdbf91450de01bb153e316dbc327",
+  "size_bytes": 241,
+  "schema_version": "14.7.0",
+  "consistency_info": {
+    "is_consistent": true,
+    "document_count": 21,
+    "audit_log_count": 17,
+    "benchmark_run_count": 2,
+    "vector_count": 315
+  }
+}

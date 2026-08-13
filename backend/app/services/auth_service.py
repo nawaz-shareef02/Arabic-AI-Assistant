@@ -45,6 +45,38 @@ class AuthService:
         self.db.add(new_user)
         self.db.commit()
         self.db.refresh(new_user)
+
+        # ── Sprint 14.1 RBAC & Organization Auto-Assignment ────────────
+        from app.repositories.organization_repository import OrganizationRepository
+        from app.repositories.role_repository import RoleRepository
+
+        org_repo = OrganizationRepository(self.db)
+        role_repo = RoleRepository(self.db)
+
+        slug = request.organization.lower().replace(" ", "-") if request.organization else "default-org"
+        is_new_org = False
+        org = org_repo.get_by_slug(slug)
+        if not org:
+            org = org_repo.create(name=request.organization or "Default Organization", slug=slug)
+            is_new_org = True
+
+        org_repo.add_member(org.id, new_user.id)
+
+        user_count = self.db.query(User).count()
+        if user_count <= 1:
+            admin_role = role_repo.get_by_name("Super Admin")
+            if admin_role:
+                role_repo.assign_role_to_user(new_user.id, admin_role.id, org.id)
+
+        if is_new_org or user_count <= 1:
+            org_admin_role = role_repo.get_by_name("Organization Admin")
+            if org_admin_role:
+                role_repo.assign_role_to_user(new_user.id, org_admin_role.id, org.id)
+        else:
+            default_role = role_repo.get_by_name("AI User")
+            if default_role:
+                role_repo.assign_role_to_user(new_user.id, default_role.id, org.id)
+
         logger.info(f"AUDIT | Action: register_success | User: {request.email} | IP: {client_ip} | Status: success")
         return new_user
 
@@ -70,7 +102,7 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User account is inactive"
             )
-        
+
         user.last_login = datetime.datetime.now(datetime.timezone.utc)
         self.db.commit()
         self.db.refresh(user)
@@ -78,7 +110,20 @@ class AuthService:
         return user
 
     def generate_token(self, user: User) -> TokenResponse:
-        access_token = create_access_token(subject=user.email)
+        from app.repositories.role_repository import RoleRepository
+        role_repo = RoleRepository(self.db)
+        roles = role_repo.get_user_roles(user.id)
+        role_ids = [r.id for r in roles]
+
+        org_id = user.organization_memberships[0].organization_id if user.organization_memberships else None
+
+        additional_claims = {
+            "user_id": user.id,
+            "org_id": org_id,
+            "role_ids": role_ids,
+        }
+
+        access_token = create_access_token(subject=user.email, additional_claims=additional_claims)
         return TokenResponse(
             access_token=access_token,
             token_type="bearer"

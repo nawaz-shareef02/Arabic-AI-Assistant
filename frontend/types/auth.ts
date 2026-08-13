@@ -1,4 +1,4 @@
-export type Role = "admin" | "employee" | "manager" | "viewer";
+export type Role = "Super Admin" | "Organization Admin" | "Knowledge Manager" | "Editor" | "AI User" | "Viewer" | "admin" | "employee" | "manager" | string;
 
 export interface Permissions {
   canViewDashboard: boolean;
@@ -15,6 +15,8 @@ export interface User {
   name: string;
   email: string;
   role: Role;
+  roles?: string[];
+  permissions?: string[];
   avatar?: string;
   organization: string;
   preferredLanguage: "en" | "ar";

@@ -3,7 +3,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_db, get_current_user
+from app.core.dependencies import get_db, get_current_user, require_permission
 from app.models.user import User
 from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate, KnowledgeBaseResponse
 from app.services.knowledge_base_service import KnowledgeBaseService
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/knowledge-bases", tags=["KNOWLEDGE_BASE"])
 def create_knowledge_base(
     request: KnowledgeBaseCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("knowledge_base.create"))
 ):
     service = KnowledgeBaseService(db)
     return service.create_kb(request, owner_id=current_user.id)
@@ -66,3 +66,17 @@ def delete_knowledge_base(
 ):
     service = KnowledgeBaseService(db)
     return service.delete_kb(uuid, owner_id=current_user.id)
+
+
+@router.get("/{uuid}/health", status_code=status.HTTP_200_OK)
+def get_knowledge_base_health(
+    uuid: py_uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    service = KnowledgeBaseService(db)
+    kb = service.get_kb(uuid, owner_id=current_user.id)
+
+    from app.services.knowledge_health_service import KnowledgeHealthService
+    health_service = KnowledgeHealthService(db)
+    return health_service.calculate_health(knowledge_base_id=kb.id)
