@@ -275,6 +275,16 @@ def process_document_async(self, document_id: int, knowledge_base_id: int):
             total_duration,
         )
 
+        # Record success metrics — wrapped so they never interfere with task cleanup.
+        try:
+            from app.core.prometheus_exporter import metrics_registry
+            metrics_registry.celery_tasks_total.labels(status="success").inc()
+            metrics_registry.celery_task_duration_seconds.labels(
+                status="success"
+            ).observe(total_duration)
+        except Exception:
+            pass
+
         # ── 8. Dispatch intelligence pipeline (non-blocking, separate task) ──
         # run_intelligence_pipeline is a separate Celery task so the current
         # worker is freed immediately.  This replaces the threading.Thread call
@@ -345,6 +355,16 @@ def process_document_async(self, document_id: int, knowledge_base_id: int):
                 except Exception:
                     pass
             retry_delay = min(60 * (self.request.retries + 1), 300)
+            # Count this attempt as a retry (NOT a final failure).
+            try:
+                from app.core.prometheus_exporter import metrics_registry
+                elapsed = time.perf_counter() - task_start
+                metrics_registry.celery_tasks_total.labels(status="retry").inc()
+                metrics_registry.celery_task_duration_seconds.labels(
+                    status="retry"
+                ).observe(elapsed)
+            except Exception:
+                pass
             raise self.retry(exc=exc, countdown=retry_delay)
 
         # Max retries exhausted — leave status as FAILED.
@@ -354,6 +374,16 @@ def process_document_async(self, document_id: int, knowledge_base_id: int):
             document_id,
             self.max_retries,
         )
+        # Count final exhaustion as a failure.
+        try:
+            from app.core.prometheus_exporter import metrics_registry
+            elapsed = time.perf_counter() - task_start
+            metrics_registry.celery_tasks_total.labels(status="failure").inc()
+            metrics_registry.celery_task_duration_seconds.labels(
+                status="failure"
+            ).observe(elapsed)
+        except Exception:
+            pass
 
     finally:
         # Guaranteed session cleanup regardless of success or failure.
