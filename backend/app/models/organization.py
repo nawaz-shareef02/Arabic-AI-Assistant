@@ -1,7 +1,7 @@
 import uuid as py_uuid
 import datetime
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, JSON, func, UUID
+from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, JSON, UniqueConstraint, func, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base
 
@@ -83,6 +83,10 @@ class OrganizationMember(Base):
     )
     joined_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id", name="uq_org_members_org_user"),
     )
 
     # Relationships

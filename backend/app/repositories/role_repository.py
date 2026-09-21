@@ -73,3 +73,19 @@ class RoleRepository:
             .filter(UserRole.user_id == user_id)
             .all()
         )
+
+    def get_users_roles_batch(self, user_ids: List[int]) -> dict:
+        """Return a mapping of user_id -> List[Role] in a single query."""
+        if not user_ids:
+            return {}
+
+        rows = (
+            self.db.query(UserRole.user_id, Role)
+            .join(Role, Role.id == UserRole.role_id)
+            .filter(UserRole.user_id.in_(user_ids))
+            .all()
+        )
+        res = {uid: [] for uid in user_ids}
+        for uid, role in rows:
+            res[uid].append(role)
+        return res

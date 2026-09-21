@@ -1,7 +1,7 @@
 import uuid as py_uuid
 import datetime
 from typing import Optional, TYPE_CHECKING
-from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, func, UUID
+from sqlalchemy import String, Integer, BigInteger, DateTime, ForeignKey, Index, func, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base
 
@@ -25,6 +25,7 @@ class Document(Base):
     )
     knowledge_base_id: Mapped[int] = mapped_column(
         ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        index=True,
         nullable=False
     )
     created_by: Mapped[Optional[int]] = mapped_column(
@@ -55,6 +56,11 @@ class Document(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_documents_kb_created", "knowledge_base_id", "created_at"),
+        Index("ix_documents_kb_sha256", "knowledge_base_id", "sha256_hash"),
     )
 
     # Relationships

@@ -1,35 +1,16 @@
 """
-NotificationService — Refinement #11: Abstract Email Provider & Notification Service.
+NotificationService — Reusable Notification Dispatcher.
 
-Provides pluggable EmailProvider interface (Console/Log provider initially;
-ready for SendGrid, AWS SES, Mailgun, or SMTP without business logic churn).
+Maintains backward-compatible alias to EmailService.
 """
 
-import logging
-from abc import ABC, abstractmethod
-
-logger = logging.getLogger("app.services.notification_service")
-
-
-class EmailProvider(ABC):
-    @abstractmethod
-    def send_email(self, to_email: str, subject: str, body_html: str) -> bool:
-        pass
-
-
-class ConsoleEmailProvider(EmailProvider):
-    """Development / Testing Email Provider logging email payloads."""
-    def send_email(self, to_email: str, subject: str, body_html: str) -> bool:
-        logger.info(
-            f"EMAIL_DISPATCH | To: {to_email} | Subject: {subject} |\n"
-            f"--- Body ---\n{body_html}\n------------"
-        )
-        return True
+from typing import Optional
+from app.services.email_service import EmailService, EmailProvider, ConsoleEmailProvider
 
 
 class NotificationService:
-    def __init__(self, provider: EmailProvider = None):
-        self.provider = provider or ConsoleEmailProvider()
+    def __init__(self, provider: Optional[EmailProvider] = None):
+        self.email_service = EmailService(provider=provider)
 
     def send_organization_invitation(
         self,
@@ -37,12 +18,12 @@ class NotificationService:
         org_name: str,
         invitation_link: str,
         role_name: str,
+        inviter_name: str = "",
     ) -> bool:
-        subject = f"You've been invited to join {org_name} on ArabIQ"
-        html = (
-            f"<h2>Organization Invitation</h2>"
-            f"<p>You have been invited to join <strong>{org_name}</strong> as <strong>{role_name}</strong> on ArabIQ AI platform.</p>"
-            f"<p><a href='{invitation_link}'>Click here to accept your invitation</a></p>"
-            f"<p>Link: {invitation_link}</p>"
+        return self.email_service.send_organization_invitation(
+            to_email=to_email,
+            org_name=org_name,
+            invitation_link=invitation_link,
+            role_name=role_name,
+            inviter_name=inviter_name,
         )
-        return self.provider.send_email(to_email, subject, html)

@@ -22,6 +22,7 @@ class DocumentChunk(Base):
 
     parsed_document_id: Mapped[int] = mapped_column(
         ForeignKey("parsed_documents.id", ondelete="CASCADE"),
+        index=True,
         nullable=False,
     )
 
