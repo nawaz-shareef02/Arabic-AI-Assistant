@@ -8,7 +8,7 @@ Refinement #10: Organization Activity Timeline Feed.
 import datetime
 import logging
 from typing import List, Dict, Any, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from fastapi import HTTPException, status
 
 from app.models.organization import Organization, OrganizationMember
@@ -76,13 +76,20 @@ class OrganizationService:
     def get_organization_members(self, org_id: int) -> List[Dict[str, Any]]:
         members = (
             self.db.query(OrganizationMember)
+            .options(joinedload(OrganizationMember.user))
             .filter(OrganizationMember.organization_id == org_id)
             .all()
         )
+        if not members:
+            return []
+
+        user_ids = [m.user_id for m in members]
+        roles_by_user = self.role_repo.get_users_roles_batch(user_ids)
+
         result = []
         for m in members:
             u = m.user
-            user_roles = self.role_repo.get_user_roles(u.id)
+            user_roles = roles_by_user.get(u.id, [])
             role_names = [r.name for r in user_roles if r.organization_id == org_id or r.is_system_role]
             result.append({
                 "id": m.id,

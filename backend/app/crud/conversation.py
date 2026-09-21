@@ -189,3 +189,18 @@ class ConversationRepository:
             )
             or 0
         )
+
+    def count_messages_batch(self, conversation_ids: List[int]) -> dict:
+        """Return a mapping of conversation_id -> total message count in a single query."""
+        if not conversation_ids:
+            return {}
+
+        from app.models.message import Message
+
+        stmt = (
+            select(Message.conversation_id, func.count(Message.id))
+            .where(Message.conversation_id.in_(conversation_ids))
+            .group_by(Message.conversation_id)
+        )
+        rows = self.db.execute(stmt).all()
+        return {conv_id: count for conv_id, count in rows}

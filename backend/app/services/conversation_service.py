@@ -90,10 +90,13 @@ class ConversationService:
         )
         pages = math.ceil(total / page_size) if page_size > 0 else 1
 
+        conv_ids = [conv.id for conv in conversations]
+        msg_counts = self._conv_repo.count_messages_batch(conv_ids)
+
         responses = []
         for conv in conversations:
             r = self._to_response(conv)
-            r.message_count = self._conv_repo.count_messages(conv.id)
+            r.message_count = msg_counts.get(conv.id, 0)
             responses.append(r)
 
         return ConversationListResponse(

@@ -1,7 +1,7 @@
 import uuid as py_uuid
 from typing import List, Optional
 from sqlalchemy import or_, desc, asc
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
 from app.schemas.document import DocumentCreate, DocumentUpdate
@@ -24,11 +24,20 @@ def create_doc(db: Session, doc_in: DocumentCreate, kb_id: int, creator_id: int)
     return db_doc
 
 def get_doc_by_uuid(db: Session, doc_uuid: py_uuid.UUID, owner_id: int) -> Optional[Document]:
-    return db.query(Document).join(KnowledgeBase).filter(
-        Document.uuid == doc_uuid,
-        KnowledgeBase.owner_id == owner_id,
-        KnowledgeBase.is_active == True
-    ).first()
+    return (
+        db.query(Document)
+        .options(
+            joinedload(Document.parsed_document),
+            joinedload(Document.knowledge_base),
+        )
+        .join(KnowledgeBase)
+        .filter(
+            Document.uuid == doc_uuid,
+            KnowledgeBase.owner_id == owner_id,
+            KnowledgeBase.is_active == True,
+        )
+        .first()
+    )
 
 def get_docs(
     db: Session,
@@ -40,9 +49,17 @@ def get_docs(
     page: int = 1,
     page_size: int = 20
 ) -> List[Document]:
-    query = db.query(Document).join(KnowledgeBase).filter(
-        KnowledgeBase.owner_id == owner_id,
-        KnowledgeBase.is_active == True
+    query = (
+        db.query(Document)
+        .options(
+            joinedload(Document.parsed_document),
+            joinedload(Document.knowledge_base),
+        )
+        .join(KnowledgeBase)
+        .filter(
+            KnowledgeBase.owner_id == owner_id,
+            KnowledgeBase.is_active == True,
+        )
     )
 
     if kb_id is not None:

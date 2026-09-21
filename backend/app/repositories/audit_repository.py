@@ -4,7 +4,7 @@ AuditRepository — Append-Only Immutable Data Access for System Audit Logs.
 
 import datetime
 from typing import List, Optional, Tuple, Dict, Any
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.models.audit_log import AuditLog
 
 
@@ -87,7 +87,8 @@ class AuditRepository:
 
         total = query.count()
         results = (
-            query.order_by(AuditLog.timestamp.desc())
+            query.options(joinedload(AuditLog.user))
+            .order_by(AuditLog.timestamp.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
             .all()
@@ -95,4 +96,9 @@ class AuditRepository:
         return results, total
 
     def get_by_id(self, log_id: int) -> Optional[AuditLog]:
-        return self.db.query(AuditLog).filter(AuditLog.id == log_id).first()
+        return (
+            self.db.query(AuditLog)
+            .options(joinedload(AuditLog.user))
+            .filter(AuditLog.id == log_id)
+            .first()
+        )

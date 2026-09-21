@@ -3,7 +3,7 @@ OrganizationRepository — Data Access for Multi-Tenant Organizations & Workspac
 """
 
 from typing import List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from app.models.organization import Organization, OrganizationMember
 from app.models.workspace import Workspace
 
@@ -43,6 +43,7 @@ class OrganizationRepository:
     def get_user_organizations(self, user_id: int) -> List[Organization]:
         return (
             self.db.query(Organization)
+            .options(selectinload(Organization.workspaces))
             .join(OrganizationMember, Organization.id == OrganizationMember.organization_id)
             .filter(OrganizationMember.user_id == user_id)
             .all()

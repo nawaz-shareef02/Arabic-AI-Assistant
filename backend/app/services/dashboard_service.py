@@ -1,7 +1,7 @@
 import datetime
 from typing import List, Dict, Any, Optional
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy import func, case
+from sqlalchemy.orm import Session, joinedload
 from app.models.knowledge_base import KnowledgeBase
 from app.models.document import Document
 
@@ -10,63 +10,57 @@ class DashboardService:
         self.db = db
 
     def get_summary(self, owner_id: int) -> Dict[str, Any]:
-        # Count active knowledge bases owned by the user
-        kb_count = self.db.query(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True
-        ).count()
+        # 1. Count active knowledge bases owned by the user
+        kb_count = (
+            self.db.query(KnowledgeBase)
+            .filter(
+                KnowledgeBase.owner_id == owner_id,
+                KnowledgeBase.is_active == True,
+            )
+            .count()
+        )
 
-        # Count documents inside active knowledge bases owned by the user
-        doc_count = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True
-        ).count()
+        # 2. Consolidated document aggregation query: counts by status, total, storage bytes, last upload
+        stats = (
+            self.db.query(
+                func.count(Document.id).label("doc_count"),
+                func.coalesce(func.sum(case((Document.status == "Uploaded", 1), else_=0)), 0).label("uploaded_count"),
+                func.coalesce(func.sum(case((Document.status == "Parsing", 1), else_=0)), 0).label("parsing_count"),
+                func.coalesce(func.sum(case((Document.status == "Parsed", 1), else_=0)), 0).label("parsed_count"),
+                func.coalesce(func.sum(case((Document.status == "Failed", 1), else_=0)), 0).label("failed_count"),
+                func.coalesce(func.sum(Document.file_size), 0).label("storage_bytes"),
+                func.max(Document.created_at).label("last_upload"),
+            )
+            .join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+            .filter(
+                KnowledgeBase.owner_id == owner_id,
+                KnowledgeBase.is_active == True,
+            )
+            .first()
+        )
 
-        # Count documents by status inside active knowledge bases owned by the user
-        uploaded_count = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True,
-            Document.status == "Uploaded"
-        ).count()
-
-        parsing_count = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True,
-            Document.status == "Parsing"
-        ).count()
-
-        parsed_count_status = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True,
-            Document.status == "Parsed"
-        ).count()
-
-        failed_count = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True,
-            Document.status == "Failed"
-        ).count()
-
-        # Calculate sum of document sizes in bytes
-        storage_bytes = self.db.query(func.sum(Document.file_size)).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True
-        ).scalar() or 0
-
-        # Convert to MB (rounded to 2 decimal places)
+        doc_count = int(stats.doc_count) if stats and stats.doc_count else 0
+        uploaded_count = int(stats.uploaded_count) if stats and stats.uploaded_count else 0
+        parsing_count = int(stats.parsing_count) if stats and stats.parsing_count else 0
+        parsed_count_status = int(stats.parsed_count) if stats and stats.parsed_count else 0
+        failed_count = int(stats.failed_count) if stats and stats.failed_count else 0
+        storage_bytes = int(stats.storage_bytes) if stats and stats.storage_bytes else 0
         storage_mb = round(storage_bytes / (1024 * 1024), 2)
+        last_upload = stats.last_upload if stats else None
 
-        # Retrieve last upload timestamp
-        last_upload = self.db.query(func.max(Document.created_at)).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True
-        ).scalar()
-
-        # Retrieve recent activity: 5 most recent documents
-        recent_docs = self.db.query(Document).join(KnowledgeBase).filter(
-            KnowledgeBase.owner_id == owner_id,
-            KnowledgeBase.is_active == True
-        ).order_by(Document.created_at.desc()).limit(5).all()
+        # 3. Retrieve recent activity: 5 most recent documents with eager-loaded KB
+        recent_docs = (
+            self.db.query(Document)
+            .options(joinedload(Document.knowledge_base))
+            .join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+            .filter(
+                KnowledgeBase.owner_id == owner_id,
+                KnowledgeBase.is_active == True,
+            )
+            .order_by(Document.created_at.desc())
+            .limit(5)
+            .all()
+        )
 
         recent_activity = []
         for doc in recent_docs:
@@ -76,8 +70,8 @@ class DashboardService:
                 "mime_type": doc.mime_type,
                 "status": doc.status,
                 "created_at": doc.created_at,
-                "kb_name": doc.knowledge_base.name,
-                "kb_uuid": doc.knowledge_base.uuid
+                "kb_name": doc.knowledge_base.name if doc.knowledge_base else "",
+                "kb_uuid": doc.knowledge_base.uuid if doc.knowledge_base else None,
             })
 
         return {
@@ -90,5 +84,5 @@ class DashboardService:
             "uploaded_docs": uploaded_count,
             "parsing_docs": parsing_count,
             "parsed_docs": parsed_count_status,
-            "failed_docs": failed_count
+            "failed_docs": failed_count,
         }
