@@ -6,6 +6,7 @@ from app.services.search_service import SearchService
 def test_semantic_search():
     """Test SearchService.semantic_search with mocked vector search results."""
     mock_db = MagicMock()
+    mock_db.query.return_value.filter.return_value.all.return_value = [(1,)]
     mock_point = MagicMock()
     mock_point.id = 1
     mock_point.score = 0.95
@@ -19,6 +20,7 @@ def test_semantic_search():
         results = service.semantic_search(
             query="What is Saudi Vision 2030?",
             knowledge_base_id=5,
+            organization_id=1,
         )
 
         assert len(results) == 1

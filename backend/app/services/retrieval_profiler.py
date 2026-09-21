@@ -109,6 +109,34 @@ class RetrievalProfiler:
             (m.token_count / (m.llm_ms / 1000)) if m.llm_ms > 0 else 0
         )
 
+        # ── Prometheus emission ───────────────────────────────────────────────
+        # Emit per-stage timings to ai_stage_duration_seconds.
+        # Stage names match the fixed label set documented in MetricsRegistry.
+        # Wrapped in a single try/except: telemetry failure must not break RAG.
+        try:
+            from app.core.prometheus_exporter import metrics_registry
+            _stage_map = {
+                "query_expansion": m.query_expansion_ms,
+                "embedding":       m.embedding_ms,
+                "dense_search":    m.dense_search_ms,
+                "keyword_search":  m.keyword_search_ms,
+                "fusion":          m.fusion_ms,
+                "filtering":       m.filtering_ms,
+                "rerank":          m.rerank_ms,
+                "prompt_build":    m.prompt_build_ms,
+                "llm":             m.llm_ms,
+                "streaming":       m.streaming_ms,
+            }
+            for stage, ms in _stage_map.items():
+                if ms > 0:
+                    metrics_registry.ai_stage_duration_seconds.labels(
+                        stage=stage
+                    ).observe(ms / 1000.0)
+            if m.fused_results > 0:
+                metrics_registry.ai_retrieval_result_count.observe(m.fused_results)
+        except Exception:
+            pass
+
         logger.info(
             "\n"
             "┌───────────────────────────────────────────────┐\n"
@@ -133,3 +161,4 @@ class RetrievalProfiler:
             "└───────────────────────────────────────────────┘"
         )
         return m
+

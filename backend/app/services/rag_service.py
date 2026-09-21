@@ -36,8 +36,9 @@ Performance:
 """
 
 import logging
-from typing import Optional, List, Dict, Generator, Tuple
+from typing import Any, Optional, List, Dict, Generator, Tuple
 
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -50,6 +51,7 @@ from app.services.query_expansion_service import QueryExpansionService
 from app.services.reranker_service import get_reranker
 from app.services.retrieval_profiler import RetrievalProfiler
 from app.services.llm import LLMFactory
+from app.services.prompt_security_service import PromptSecurityService
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,59 @@ class RAGService:
         ]
 
     # ------------------------------------------------------------------
+    # P2-2: Connection Lifecycle & Decoupled Persistence Helpers
+    # ------------------------------------------------------------------
+
+    def _release_db(self) -> None:
+        """
+        Commits and closes the initial DB session so no PostgreSQL connection
+        remains checked out during external Ollama LLM inference or streaming.
+        """
+        if self.db is not None:
+            try:
+                self.db.commit()
+            except Exception:
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+            try:
+                self.db.close()
+            except Exception:
+                pass
+
+    def _persist_assistant_message(
+        self,
+        conversation_id: int,
+        content: str,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        completion_tokens: int = 0,
+    ) -> None:
+        """
+        Persists the assistant message using an isolated short-lived DB session
+        only when persistence is actually required, preventing connection leaks.
+        """
+        from app.database.session import SessionLocal
+        db = SessionLocal()
+        try:
+            MessageRepository(db).create(
+                conversation_id=conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=content,
+                citations=citations,
+                completion_tokens=completion_tokens,
+                total_tokens=completion_tokens,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to persist assistant message for conv {conversation_id}: {exc}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
     # Non-streaming Ask (stateless — backward compatible)
     # ------------------------------------------------------------------
 
@@ -125,10 +180,35 @@ class RAGService:
         question: str,
         knowledge_base_id: int,
         organization_id: Optional[int] = None,
+        user=None,
     ) -> dict:
 
         profiler = RetrievalProfiler()
         logger.info("Starting RAG pipeline (non-streaming, hybrid)...")
+
+        # ── P0-3: Prompt Security Gate ───────────────────────────────────
+        # MUST run before any search, embedding, or LLM call.
+        if user is not None:
+            sec = PromptSecurityService(self.db)
+            decision = sec.process_prompt(
+                prompt=question,
+                user=user,
+                kb_id=knowledge_base_id,
+                org_id=organization_id,
+            )
+            if decision["decision"] in ("BLOCKED", "DENIED"):
+                logger.warning(
+                    "AUDIT_RAG | Action: prompt_rejected | User: %s | Decision: %s "
+                    "| Reason: %s | Risk: %.2f",
+                    user.id,
+                    decision["decision"],
+                    decision["reason"],
+                    decision["risk_score"],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Request blocked: {decision['reason']}",
+                )
 
         # ── Step 1: Query Expansion ──────────────────────────────────────
         profiler.start("query_expansion")
@@ -146,6 +226,7 @@ class RAGService:
 
         if not results:
             logger.warning("No relevant chunks found.")
+            self._release_db()
             return {
                 "answer": "I couldn't find enough information in the uploaded documents.",
                 "sources": [],
@@ -164,6 +245,10 @@ class RAGService:
             question=question, contexts=contexts
         )
         profiler.stop("prompt_build")
+
+        # ── P2-2: Release DB connection prior to external LLM inference ───
+        # Guarantees zero PostgreSQL connections checked out during Ollama HTTP call.
+        self._release_db()
 
         # ── Step 5: Generate Answer ──────────────────────────────────────
         profiler.start("llm")
@@ -188,9 +273,34 @@ class RAGService:
         question: str,
         knowledge_base_id: int,
         organization_id: Optional[int] = None,
+        user=None,
     ):
         profiler = RetrievalProfiler()
         logger.info("Starting RAG pipeline (streaming, hybrid)...")
+
+        # ── P0-3: Prompt Security Gate ───────────────────────────────────
+        # Streaming is NOT exempt from security checks.
+        if user is not None:
+            sec = PromptSecurityService(self.db)
+            decision = sec.process_prompt(
+                prompt=question,
+                user=user,
+                kb_id=knowledge_base_id,
+                org_id=organization_id,
+            )
+            if decision["decision"] in ("BLOCKED", "DENIED"):
+                logger.warning(
+                    "AUDIT_RAG | Action: prompt_rejected (streaming) | User: %s "
+                    "| Decision: %s | Reason: %s | Risk: %.2f",
+                    user.id,
+                    decision["decision"],
+                    decision["reason"],
+                    decision["risk_score"],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Request blocked: {decision['reason']}",
+                )
 
         # ── Step 1: Query Expansion ──────────────────────────────────────
         profiler.start("query_expansion")
@@ -207,6 +317,7 @@ class RAGService:
         )
 
         if not results:
+            self._release_db()
             yield "I couldn't find enough information in the uploaded documents."
             return
 
@@ -223,6 +334,10 @@ class RAGService:
             question=question, contexts=contexts
         )
         profiler.stop("prompt_build")
+
+        # ── P2-2: Release DB connection prior to external token streaming ─
+        # Guarantees zero PostgreSQL connections checked out during Ollama streaming.
+        self._release_db()
 
         # ── Step 5: Stream tokens ────────────────────────────────────────
         profiler.start("llm")
@@ -254,11 +369,35 @@ class RAGService:
         conversation_id: int,
         user_id: int,
         organization_id: Optional[int] = None,
+        user=None,
     ) -> dict:
         """
         Conversational RAG pipeline (non-streaming).
         """
         profiler = RetrievalProfiler()
+
+        # ── P0-3: Prompt Security Gate ───────────────────────────────────
+        if user is not None:
+            sec = PromptSecurityService(self.db)
+            decision = sec.process_prompt(
+                prompt=question,
+                user=user,
+                kb_id=knowledge_base_id,
+                org_id=organization_id,
+            )
+            if decision["decision"] in ("BLOCKED", "DENIED"):
+                logger.warning(
+                    "AUDIT_RAG | Action: prompt_rejected (conv) | User: %s "
+                    "| Decision: %s | Reason: %s | Risk: %.2f",
+                    user.id,
+                    decision["decision"],
+                    decision["reason"],
+                    decision["risk_score"],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Request blocked: {decision['reason']}",
+                )
 
         # ── Step 1: Save user message ─────────────────────────────────────
         user_msg = self._msg_repo.create(
@@ -295,9 +434,9 @@ class RAGService:
 
         if not results:
             answer = "I couldn't find enough information in the uploaded documents."
-            self._msg_repo.create(
+            self._release_db()
+            self._persist_assistant_message(
                 conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
                 content=answer,
             )
             return {"answer": answer, "sources": []}
@@ -318,6 +457,10 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # ── P2-2: Release DB connection prior to external LLM generation ──
+        # Guarantees zero PostgreSQL connections checked out during Ollama HTTP call.
+        self._release_db()
+
         # ── Step 8: Generate ──────────────────────────────────────────────
         profiler.start("llm")
         answer = self.llm.generate(prompt)
@@ -326,15 +469,13 @@ class RAGService:
         # ── Step 9: Build sources ─────────────────────────────────────────
         sources = self._build_sources(results)
 
-        # ── Step 10: Save assistant message ───────────────────────────────
+        # ── Step 10: Save assistant message via isolated short-lived session ─
         completion_tokens = len(answer.split())
-        self._msg_repo.create(
+        self._persist_assistant_message(
             conversation_id=conversation_id,
-            role=MessageRole.ASSISTANT,
             content=answer,
             citations=sources,
             completion_tokens=completion_tokens,
-            total_tokens=completion_tokens,
         )
 
         profiler.set("token_count", completion_tokens)
@@ -353,6 +494,7 @@ class RAGService:
         conversation_id: int,
         user_id: int,
         organization_id: Optional[int] = None,
+        user=None,
     ):
         """
         Conversational RAG pipeline (streaming).
@@ -365,6 +507,7 @@ class RAGService:
 
         Pipeline
         --------
+        0. Prompt Security Gate (P0-3) — blocks injection/denied access
         1. Save user message
         2. Retrieve history within token budget
         3. Rewrite follow-up question
@@ -376,6 +519,30 @@ class RAGService:
         9. [On success] Save assistant message + update last_message_at
         """
         profiler = RetrievalProfiler()
+
+        # ── P0-3: Prompt Security Gate ───────────────────────────────────
+        # Must run before saving the user message or any pipeline stage.
+        if user is not None:
+            sec = PromptSecurityService(self.db)
+            decision = sec.process_prompt(
+                prompt=question,
+                user=user,
+                kb_id=knowledge_base_id,
+                org_id=organization_id,
+            )
+            if decision["decision"] in ("BLOCKED", "DENIED"):
+                logger.warning(
+                    "AUDIT_RAG | Action: prompt_rejected (conv-streaming) | User: %s "
+                    "| Decision: %s | Reason: %s | Risk: %.2f",
+                    user.id,
+                    decision["decision"],
+                    decision["reason"],
+                    decision["risk_score"],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Request blocked: {decision['reason']}",
+                )
 
         # ── Step 1: Save user message ─────────────────────────────────────
         user_msg = self._msg_repo.create(
@@ -404,15 +571,16 @@ class RAGService:
         results = self.search_service.hybrid_search(
             query=rewritten,
             knowledge_base_id=knowledge_base_id,
+            organization_id=organization_id,
             expanded_query=expanded,
             profiler=profiler,
         )
 
         if not results:
             no_info = "I couldn't find enough information in the uploaded documents."
-            self._msg_repo.create(
+            self._release_db()
+            self._persist_assistant_message(
                 conversation_id=conversation_id,
-                role=MessageRole.ASSISTANT,
                 content=no_info,
             )
             yield no_info
@@ -435,6 +603,10 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # ── P2-2: Release DB connection prior to external token streaming ─
+        # Guarantees zero PostgreSQL connections checked out during Ollama streaming.
+        self._release_db()
+
         # ── Step 8: Stream — accumulate for DB save ───────────────────────
         profiler.start("llm")
         first_token_recorded: bool = False
@@ -456,23 +628,21 @@ class RAGService:
         finally:
             profiler.stop("llm")
 
-            # ── Step 9: Save assistant message ONLY on success ───────────
+            # ── Step 9: Save assistant message ONLY on success via isolated session ──
             if stream_succeeded and accumulated_answer:
                 completion_tokens = len(accumulated_answer.split())
-                self._msg_repo.create(
+                self._persist_assistant_message(
                     conversation_id=conversation_id,
-                    role=MessageRole.ASSISTANT,
                     content=accumulated_answer,
                     citations=sources,
                     completion_tokens=completion_tokens,
-                    total_tokens=completion_tokens,
                 )
                 logger.info(
                     f"Saved assistant message for conversation {conversation_id}"
                 )
             elif not stream_succeeded:
                 logger.warning(
-                    f"Stream failed for conversation {conversation_id} — "
+                    f"Stream failed or cancelled for conversation {conversation_id} — "
                     "partial output NOT saved."
                 )
 

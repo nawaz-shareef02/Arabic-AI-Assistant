@@ -11,6 +11,7 @@ from qdrant_client.models import (
     Filter,
     FieldCondition,
     MatchValue,
+    PayloadSchemaType,
 )
 
 from app.core.config import settings
@@ -75,6 +76,62 @@ class QdrantService:
     # Collection
     # --------------------------------------------------
 
+    def ensure_payload_indexes(self):
+        """
+        Idempotently ensure required payload indexes exist on the collection.
+        Restart-safe and non-destructive:
+        - Never deletes the collection.
+        - Never recreates the collection.
+        - Never deletes or modifies points/vectors.
+        - Never changes vector dimension or distance metric.
+        """
+        try:
+            collection_info = self.client.get_collection(self.collection_name)
+            existing_schema = collection_info.payload_schema or {}
+
+            indexes_to_create = {
+                "organization_id": PayloadSchemaType.INTEGER,
+                "knowledge_base_id": PayloadSchemaType.INTEGER,
+            }
+            for field_name, expected_schema in indexes_to_create.items():
+                existing_info = existing_schema.get(field_name)
+                if existing_info is not None:
+                    existing_type = getattr(existing_info, "data_type", None)
+                    if existing_type is None and isinstance(existing_info, dict):
+                        existing_type = existing_info.get("data_type")
+
+                    # Check if already indexed with the expected INTEGER schema
+                    if existing_type in (expected_schema, expected_schema.value, "integer"):
+                        logger.debug(
+                            f"Payload index for '{field_name}' (INTEGER) already exists on '{self.collection_name}'."
+                        )
+                        continue
+                    else:
+                        logger.info(
+                            f"Payload index for '{field_name}' exists with type '{existing_type}', migrating to INTEGER..."
+                        )
+                        try:
+                            self.client.delete_payload_index(
+                                collection_name=self.collection_name,
+                                field_name=field_name,
+                            )
+                        except Exception as del_err:
+                            logger.warning(
+                                f"Could not remove old payload index for '{field_name}': {del_err}"
+                            )
+
+                logger.info(
+                    f"Creating payload index for '{field_name}' ({expected_schema}) on '{self.collection_name}'..."
+                )
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=expected_schema,
+                )
+                logger.info(f"Payload index for '{field_name}' (INTEGER) verified/created.")
+        except Exception as exc:
+            logger.warning(f"Payload index check/creation skipped or encountered error: {exc}")
+
     def create_collection(self):
 
         collections = self.client.get_collections().collections
@@ -85,6 +142,7 @@ class QdrantService:
             logger.info(
                 f"Collection '{self.collection_name}' already exists."
             )
+            self.ensure_payload_indexes()
             return
 
         dimension = self.embedding_service.get_dimension()
@@ -100,6 +158,7 @@ class QdrantService:
         logger.info(
             f"Collection '{self.collection_name}' created."
         )
+        self.ensure_payload_indexes()
 
     # --------------------------------------------------
     # Insert Vectors
@@ -168,23 +227,25 @@ class QdrantService:
         if limit is None:
             limit = settings.TOP_K_RESULTS
 
-        must_conditions = []
-        if organization_id is not None:
-            must_conditions.append(
+        # AI-3 Enterprise Tenant Boundary Enforcement (Fail-Closed)
+        if organization_id is None or knowledge_base_id is None:
+            raise ValueError(
+                "Tenant boundary missing: Qdrant search requires both 'organization_id' "
+                "and 'knowledge_base_id' to enforce fail-closed isolation."
+            )
+
+        query_filter = Filter(
+            must=[
                 FieldCondition(
                     key="organization_id",
                     match=MatchValue(value=organization_id),
-                )
-            )
-        if knowledge_base_id is not None:
-            must_conditions.append(
+                ),
                 FieldCondition(
                     key="knowledge_base_id",
                     match=MatchValue(value=knowledge_base_id),
-                )
-            )
-
-        query_filter = Filter(must=must_conditions) if must_conditions else None
+                ),
+            ]
+        )
 
         response = self.client.query_points(
             collection_name=self.collection_name,

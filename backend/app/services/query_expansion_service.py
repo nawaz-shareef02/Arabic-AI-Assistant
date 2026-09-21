@@ -124,6 +124,11 @@ class QueryExpansionService:
             return static_expanded
 
         # ── Check Redis cache ──────────────────────────────────────────
+        cache_key = self._cache_key(query)
+        cached = self._get_cached(cache_key)
+        if cached:
+            logger.debug(f"QueryExpansion cache HIT: '{query}'")
+            return cached
 
         # ── Generate expansion via LLM ───────────────────────────────────
         try:
