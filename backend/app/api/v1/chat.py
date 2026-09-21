@@ -45,6 +45,7 @@ from app.services.chat_authorization_service import (
 )
 from app.services.prompt_security_service import PromptSecurityService
 from app.services.chat_rate_limit_service import ChatRateLimitService
+from app.services.llm.ollama_provider import OllamaProvider, OllamaOverloadedException
 from app.crud.conversation import ConversationRepository
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,13 @@ def chat(
             user=current_user,
         )
 
+    except OllamaOverloadedException:
+        logger.warning("Chat request rejected: Ollama inference capacity reached (503).")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The AI inference engine is currently at peak capacity. Please retry shortly.",
+            headers={"Retry-After": "5"},
+        )
     except HTTPException:
         raise
     except Exception:
@@ -223,6 +231,19 @@ def stream_chat(
         kb_id = authorized_kb.id
         question = request.question
 
+        # ── Step 1.25: Fast Admission Check for Ollama Engine (P2-4) ──────────
+        if not OllamaProvider.get_instance().has_available_slot():
+            rate_service.release_stream_slot(lease_id, user_id, org_id)
+            logger.warning(
+                "AUDIT_CHAT | Action: stream_rejected_capacity | User: %s | Status: 503",
+                current_user.email,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The AI inference engine is currently at peak capacity. Please retry shortly.",
+                headers={"Retry-After": "5", **rate_res.headers},
+            )
+
         # ── Step 1.5: Validate Prompt Security (synchronously before streaming) ──
         sec = PromptSecurityService(db)
         decision = sec.process_prompt(
@@ -278,6 +299,9 @@ def stream_chat(
                         conversation_id=conversation_id,
                         first_question=question,
                     )
+                except OllamaOverloadedException:
+                    logger.warning("Streaming backpressure: Ollama inference slot unavailable.")
+                    yield "The AI inference engine is currently at peak capacity. Please retry shortly."
                 finally:
                     rate_service.release_stream_slot(lease_id, user_id, org_id)
 
@@ -296,6 +320,9 @@ def stream_chat(
                     organization_id=org_id,
                     user=current_user,
                 )
+            except OllamaOverloadedException:
+                logger.warning("Streaming backpressure: Ollama inference slot unavailable.")
+                yield "The AI inference engine is currently at peak capacity. Please retry shortly."
             finally:
                 rate_service.release_stream_slot(lease_id, user_id, org_id)
 
@@ -305,6 +332,14 @@ def stream_chat(
             headers=rate_res.headers,
         )
 
+    except OllamaOverloadedException:
+        if "rate_service" in locals() and "lease_id" in locals():
+            rate_service.release_stream_slot(lease_id, user_id, org_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The AI inference engine is currently at peak capacity. Please retry shortly.",
+            headers={"Retry-After": "5"},
+        )
     except HTTPException:
         raise
     except Exception:

@@ -28,9 +28,15 @@ from app.middleware.audit_middleware import AuditMiddleware
 from app.core.config_validator import validate_startup_configuration
 
 from app.core.config import settings
+from app.core.json_logger import setup_structured_logging
+
+# Activate structured JSON logging as early as possible so all subsequent
+# log records (including startup) use the structured formatter.
+# safe to call multiple times — replaces root handler once.
+setup_structured_logging()
 
 logger = logging.getLogger("app.main")
-logging.basicConfig(level=logging.INFO)
+
 
 app = FastAPI(
     title="ArabIQ API Server",
@@ -169,6 +175,41 @@ async def add_request_id_middleware(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     return response
 
+
+# 2b. HTTP Telemetry Middleware — records request count and latency.
+# Route template extraction: FastAPI populates request.scope["route"] after
+# routing resolves inside call_next. We read it post-call to get the template
+# (e.g. "/api/v1/chat/{kb_id}") rather than the raw URL path.
+# Labels used: method (bounded), endpoint (route template — bounded by route count),
+# status (HTTP status code — bounded set). Never uses user/org/conversation IDs.
+@app.middleware("http")
+async def http_telemetry_middleware(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    try:
+        from app.core.prometheus_exporter import metrics_registry
+        duration = time.perf_counter() - t0
+        method = request.method
+        status = str(response.status_code)
+        # Extract route template to avoid high-cardinality raw URLs.
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", None)
+        if not endpoint:
+            # Fallback: use path prefix (max 50 chars) for unrouted requests.
+            raw = request.url.path
+            endpoint = raw[:50] if raw else "unknown"
+        metrics_registry.http_requests_total.labels(
+            method=method, endpoint=endpoint, status=status
+        ).inc()
+        metrics_registry.http_request_duration_seconds.labels(
+            method=method, endpoint=endpoint
+        ).observe(duration)
+    except Exception:
+        # Telemetry failures must NEVER affect the response.
+        pass
+    return response
+
+
 # 3. Payload size limiter middleware
 @app.middleware("http")
 async def limit_request_size_middleware(request: Request, call_next):
@@ -204,12 +245,15 @@ async def add_security_headers_middleware(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # Build CSP connect-src dynamically from configured allowed origins.
+    # This ensures no localhost URLs leak into production headers.
+    connect_origins = " ".join(settings.ALLOWED_ORIGINS)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
-        "connect-src 'self' http://localhost:8000 http://localhost:3000 http://127.0.0.1:3000;"
+        f"connect-src 'self' {connect_origins};"
     )
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
@@ -225,7 +269,40 @@ async def add_security_headers_middleware(request: Request, call_next):
 
     return response
 
-# 5. Global Exception Handlers
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
+from app.services.llm.ollama_provider import OllamaOverloadedException
+
+@app.exception_handler(OllamaOverloadedException)
+async def ollama_overloaded_exception_handler(request: Request, exc: OllamaOverloadedException):
+    req_id = getattr(request.state, "request_id", "unknown")
+    logger.warning(f"Ollama inference capacity reached [Req ID: {req_id}]: {str(exc)}")
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": "5"},
+        content={
+            "detail": "The AI inference engine is currently at peak capacity. Please retry shortly.",
+            "request_id": req_id,
+        },
+    )
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def pool_timeout_exception_handler(request: Request, exc: SQLAlchemyTimeoutError):
+    req_id = getattr(request.state, "request_id", "unknown")
+    logger.error(f"Database connection pool exhausted [Req ID: {req_id}]: {str(exc)}")
+    try:
+        from app.database.session import pool_metrics
+        pool_metrics.record_timeout()
+    except Exception:
+        pass
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        headers={"Retry-After": "5"},
+        content={
+            "detail": "Database connection pool capacity reached. Please retry in a few seconds.",
+            "request_id": req_id,
+        },
+    )
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     req_id = getattr(request.state, "request_id", "unknown")
@@ -251,19 +328,29 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # 6. GZip Compression Middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# 7. Trusted Host Middleware
+# 7. Trusted Host Middleware — configured from settings, not hardcoded.
+# In production set ALLOWED_HOSTS=["your-domain.com"] in environment.
+# Do NOT use ["*"] in production.
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "testserver"]
+    allowed_hosts=settings.ALLOWED_HOSTS,
 )
 
-# 8. CORS Setup (using allow-list from settings)
+# 8. CORS Setup (explicit allow-list from settings & enterprise header policy)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-Request-ID",
+    ],
 )
 
 app.add_middleware(AuditMiddleware)
@@ -283,7 +370,6 @@ app.include_router(kb_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(models_router, prefix="/api/v1")
 app.include_router(health_router)
-app.include_router(health_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")
 app.include_router(workspaces_router, prefix="/api/v1")
@@ -293,11 +379,32 @@ app.include_router(backups_router, prefix="/api/v1")
 
 from app.core.prometheus_exporter import get_prometheus_metrics_text, CONTENT_TYPE_LATEST
 from fastapi import Response
+import hmac
 
 @app.get("/metrics", summary="Prometheus Metrics Endpoint", include_in_schema=False)
-def metrics():
-    """Exposes standard Prometheus metrics format."""
+def metrics(request: Request):
+    """
+    Prometheus metrics endpoint.
+
+    Security:
+    - When METRICS_TOKEN is set in config, the request must include the header
+      X-Metrics-Token: <token>. Comparison uses hmac.compare_digest (constant-time).
+    - When METRICS_TOKEN is unset (default), the endpoint is open.
+      Deploy behind a network firewall or VPC rule restricting scraper access.
+    - The token is never echoed in error responses or logs.
+    """
+    token = settings.METRICS_TOKEN
+    if token:
+        provided = request.headers.get("X-Metrics-Token", "")
+        # constant-time comparison prevents timing-based token enumeration.
+        if not hmac.compare_digest(provided.encode(), token.encode()):
+            return Response(
+                content="Unauthorized",
+                status_code=401,
+                media_type="text/plain",
+            )
     return Response(content=get_prometheus_metrics_text(), media_type=CONTENT_TYPE_LATEST)
+
 
 @app.get("/")
 def root():

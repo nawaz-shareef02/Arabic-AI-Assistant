@@ -56,7 +56,8 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 user_agent = request.headers.get("user-agent", "")[:255]
                 status_str = "success" if response.status_code < 400 else "failure"
 
-                # Publish asynchronously using a temporary session
+                # Publish audit log using a temporary isolated session with guaranteed closure
+                db = None
                 try:
                     db = SessionLocal()
                     publisher = AuditEventPublisher(db)
@@ -75,8 +76,13 @@ class AuditMiddleware(BaseHTTPMiddleware):
                         status=status_str,
                         metadata_json={"duration_ms": duration_ms, "status_code": response.status_code},
                     )
-                    db.close()
                 except Exception as exc:
                     logger.warning(f"AuditMiddleware failed to log request: {exc}")
+                finally:
+                    if db is not None:
+                        try:
+                            db.close()
+                        except Exception:
+                            pass
 
         return response
