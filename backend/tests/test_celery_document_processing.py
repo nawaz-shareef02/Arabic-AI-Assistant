@@ -579,9 +579,10 @@ def _register_and_get_token(client, email: str = "uploader@test.com") -> str:
         },
     )
     resp = client.post(
-        "/api/v1/auth/login",
-        json={"email": email, "password": "Secure@12345"},
+        "/api/v1/auth/token",
+        data={"username": email, "password": "Secure@12345"},
     )
+    client.cookies.clear()
     return resp.json()["access_token"]
 
 

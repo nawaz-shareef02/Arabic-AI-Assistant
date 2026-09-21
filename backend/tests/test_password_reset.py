@@ -225,7 +225,7 @@ def test_valid_token_resets_password_end_to_end(client, db_session):
     # New password succeeds
     login_new = client.post("/api/v1/auth/login", json={"email": "e2e_reset@example.com", "password": "BrandNewPass@999"})
     assert login_new.status_code == 200
-    assert "access_token" in login_new.json()
+    assert "auth_token" in login_new.cookies or "access_token" in login_new.json()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

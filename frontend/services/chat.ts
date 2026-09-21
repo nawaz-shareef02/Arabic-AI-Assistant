@@ -1,4 +1,4 @@
-import { api } from "@/utils/api";
+import { api, getCsrfToken } from "@/utils/api";
 
 // ─────────────────────────────────────────────
 // Types
@@ -101,27 +101,16 @@ export const ChatService = {
     conversationId?: number
   ): Promise<void> {
     const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+    const csrfToken = getCsrfToken();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
     };
-
-    if (typeof window !== "undefined") {
-      const sessionStr = localStorage.getItem("arabiq_user_session");
-      if (sessionStr) {
-        try {
-          const session = JSON.parse(sessionStr);
-          if (session.token) {
-            headers["Authorization"] = `Bearer ${session.token}`;
-          }
-        } catch (e) {
-          console.error("Error reading token from localStorage session", e);
-        }
-      }
-    }
 
     const response = await fetch(`${API_URL}/api/v1/chat/stream`, {
       method: "POST",
       headers,
+      credentials: "include", // Transmit HttpOnly auth_token & csrf_token cookies automatically
       body: JSON.stringify({
         question,
         knowledge_base_id: knowledgeBaseId,

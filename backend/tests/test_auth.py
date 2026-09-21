@@ -115,8 +115,20 @@ def test_login_success(client):
     )
     assert response.status_code == 200
     data = response.json()
-    assert "access_token" in data
-    assert data["token_type"] == "bearer"
+    assert "access_token" not in data
+    assert data["email"] == "login@example.com"
+    assert "auth_token" in response.cookies
+    assert "csrf_token" in response.cookies
+
+    # Machine / API client token endpoint
+    token_resp = client.post(
+        "/api/v1/auth/token",
+        data={"username": "login@example.com", "password": "Secure@12345"}
+    )
+    assert token_resp.status_code == 200
+    token_data = token_resp.json()
+    assert "access_token" in token_data
+    assert token_data["token_type"] == "bearer"
 
 def test_login_wrong_password(client):
     client.post(
@@ -168,7 +180,7 @@ def test_get_me_success(client):
             "password": "Secure@12345"
         }
     )
-    token = login_response.json()["access_token"]
+    token = login_response.cookies.get("auth_token")
     
     response = client.get(
         "/api/v1/auth/me",
@@ -181,10 +193,12 @@ def test_get_me_success(client):
     assert data["last_login"] is not None
 
 def test_get_me_unauthorized(client):
+    client.cookies.clear()
     response = client.get("/api/v1/auth/me")
     assert response.status_code == 401
 
 def test_get_me_invalid_token(client):
+    client.cookies.clear()
     response = client.get(
         "/api/v1/auth/me",
         headers={"Authorization": "Bearer invalidtokenhere"}
@@ -201,6 +215,7 @@ def test_get_me_expired_token(client):
             "organization": "Test Org"
         }
     )
+    client.cookies.clear()
     
     expired_token = create_access_token(
         subject="expired@example.com",

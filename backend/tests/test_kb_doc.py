@@ -58,8 +58,8 @@ def fixture_user_tokens(client):
         }
     )
     r1 = client.post(
-        "/api/v1/auth/login",
-        json={"email": "user1@example.com", "password": "Secure@12345"}
+        "/api/v1/auth/token",
+        data={"username": "user1@example.com", "password": "Secure@12345"}
     )
     t1 = r1.json()["access_token"]
 
@@ -73,10 +73,11 @@ def fixture_user_tokens(client):
         }
     )
     r2 = client.post(
-        "/api/v1/auth/login",
-        json={"email": "user2@example.com", "password": "Secure@12345"}
+        "/api/v1/auth/token",
+        data={"username": "user2@example.com", "password": "Secure@12345"}
     )
     t2 = r2.json()["access_token"]
+    client.cookies.clear()
 
     return t1, t2
 

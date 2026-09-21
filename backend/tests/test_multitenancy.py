@@ -233,7 +233,7 @@ def test_chat_endpoint_blocks_cross_org_access(client, db_session):
 
     # Login as User B
     login_resp = client.post("/api/v1/auth/login", json={"email": "user_b@beta.com", "password": "BetaUser@123"})
-    token = login_resp.json()["access_token"]
+    token = login_resp.cookies.get("auth_token") or login_resp.json().get("access_token")
     headers = {"Authorization": f"Bearer {token}"}
 
     # User B attempts to query KB A (Org A)
@@ -251,7 +251,7 @@ def test_streaming_chat_endpoint_blocks_cross_org_access(client, db_session):
 
     # Login as User B
     login_resp = client.post("/api/v1/auth/login", json={"email": "user_b@beta.com", "password": "BetaUser@123"})
-    token = login_resp.json()["access_token"]
+    token = login_resp.cookies.get("auth_token") or login_resp.json().get("access_token")
     headers = {"Authorization": f"Bearer {token}"}
 
     # User B attempts streaming query against KB A (Org A)
@@ -307,3 +307,4 @@ def test_document_relationship_passes_tenant_boundaries_to_qdrant(db_session):
         _, search_kwargs = mock_qdrant.search.call_args
         assert search_kwargs.get("organization_id") == org_a.id
         assert search_kwargs.get("knowledge_base_id") == kb_a.id
+

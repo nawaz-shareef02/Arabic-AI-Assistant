@@ -96,9 +96,10 @@ def _register_and_login(client, email: str, password: str = "Secure@12345", orga
         },
     )
     resp = client.post(
-        "/api/v1/auth/login",
-        json={"email": email, "password": password},
+        "/api/v1/auth/token",
+        data={"username": email, "password": password},
     )
+    client.cookies.clear()
     assert resp.status_code == 200, f"Login failed: {resp.text}"
     return resp.json()["access_token"]
 
