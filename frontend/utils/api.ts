@@ -2,26 +2,41 @@ import axios from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
+/**
+ * Reads a specific cookie value by name in browser context.
+ */
+export function getCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(new RegExp("(^|;\\s*)(" + name + ")=([^;]*)"));
+  return match ? decodeURIComponent(match[3]) : null;
+}
+
+/**
+ * Retrieves the non-HttpOnly CSRF token cookie for double-submit header validation.
+ */
+export function getCsrfToken(): string | null {
+  return getCookie("csrf_token");
+}
+
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
+  withCredentials: true, // Automatically sends HttpOnly auth_token & csrf_token cookies
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-// Request interceptor to automatically append the JWT token from session storage
+// Request interceptor: automatically append X-CSRF-Token for mutating methods
 api.interceptors.request.use(
   (config) => {
     if (typeof window !== "undefined") {
-      const sessionStr = localStorage.getItem("arabiq_user_session");
-      if (sessionStr) {
-        try {
-          const session = JSON.parse(sessionStr);
-          if (session.token) {
-            config.headers.Authorization = `Bearer ${session.token}`;
-          }
-        } catch (e) {
-          console.error("Error reading token from localStorage session", e);
+      const method = (config.method || "get").toUpperCase();
+      const mutatingMethods = ["POST", "PUT", "PATCH", "DELETE"];
+
+      if (mutatingMethods.includes(method)) {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) {
+          config.headers["X-CSRF-Token"] = csrfToken;
         }
       }
     }
@@ -44,10 +59,6 @@ api.interceptors.response.use(
         // Skip redirect for auth-related endpoints — their 401s are handled by callers
         const isAuthEndpoint = url.includes("/auth/");
         if (!isAuthEndpoint) {
-          // Evict local authentication credentials
-          localStorage.removeItem("arabiq_user_session");
-          document.cookie = "arabiq-session=;path=/;expires=Thu, 01 Jan 1970 00:00:01 GMT";
-
           const path = window.location.pathname;
           if (path !== "/login" && path !== "/session-expired" && path !== "/register") {
             window.location.href = "/session-expired";

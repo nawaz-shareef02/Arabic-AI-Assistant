@@ -88,3 +88,22 @@ celery_app.conf.update(
     # Keep results for 24 h; after that they expire from Redis automatically.
     result_expires=86400,
 )
+
+# ---------------------------------------------------------------------------
+# Celery Worker Fork Safety
+# ---------------------------------------------------------------------------
+from celery.signals import worker_process_init
+
+@worker_process_init.connect
+def on_worker_process_init(**kwargs):
+    """
+    Ensure each forked Celery worker child process disposes any inherited
+    SQLAlchemy engine sockets and starts with an isolated, clean connection pool.
+    """
+    try:
+        from app.database.session import reset_engine_pool
+        reset_engine_pool()
+    except Exception as exc:
+        import logging
+        logging.getLogger("app.core.celery_app").warning(f"Error resetting DB engine pool post-fork: {exc}")
+

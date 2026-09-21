@@ -4,8 +4,15 @@ import type { NextRequest } from "next/server";
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Check for the mock session cookie
-  const sessionToken = request.cookies.get("arabiq-session")?.value;
+  /**
+   * P2-1 Security Notice:
+   * Next.js Middleware inspects request cookies for UI client navigation routing hints.
+   * Note: The presence of a cookie in middleware is only a UI navigation convenience hint.
+   * Real security boundaries and authorization enforcement are performed exclusively on the
+   * backend FastAPI server through cryptographically validated HttpOnly auth_token cookies.
+   */
+  const hasAuthHint =
+    request.cookies.has("auth_token") || request.cookies.has("csrf_token");
 
   // Route matches
   const isAuthPage =
@@ -25,13 +32,13 @@ export function proxy(request: NextRequest) {
     pathname.startsWith("/select-workspace");
 
   // Redirect unauthenticated requests to login
-  if (isProtectedPage && !sessionToken) {
+  if (isProtectedPage && !hasAuthHint) {
     const loginUrl = new URL("/login", request.url);
     return NextResponse.redirect(loginUrl);
   }
 
   // Redirect authenticated requests away from authentication views to dashboard
-  if (isAuthPage && sessionToken) {
+  if (isAuthPage && hasAuthHint) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 

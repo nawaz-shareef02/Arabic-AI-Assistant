@@ -67,15 +67,21 @@ async def liveness_probe():
 
 
 def _check_postgres() -> str:
+    db = None
     try:
         from app.database.session import SessionLocal
         from sqlalchemy import text
         db = SessionLocal()
         db.execute(text("SELECT 1"))
-        db.close()
         return "online"
     except Exception:
         return "offline"
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _check_redis() -> str:

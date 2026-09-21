@@ -1,6 +1,6 @@
 import logging
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, status, Request, HTTPException
+from fastapi import APIRouter, Depends, status, Request, Response, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,13 @@ from app.schemas.auth import (
 from app.services.auth_service import AuthService
 from app.services.session_service import SessionService
 from app.services.password_reset_service import PasswordResetService
+from app.core.cookies import (
+    set_auth_cookie,
+    set_csrf_cookie,
+    clear_auth_cookies,
+    generate_csrf_token,
+)
+from app.core.csrf import validate_origin
 from app.core.rate_limit import (
     login_limiter,
     register_limiter,
@@ -44,7 +51,19 @@ def get_client_ip(request: Request) -> str:
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(request: RegisterRequest, fastapi_req: Request, db: Session = Depends(get_db)):
+def register(
+    request: RegisterRequest,
+    fastapi_req: Request,
+    response: Response,
+    db: Session = Depends(get_db)
+):
+    """
+    Browser registration endpoint.
+    Origin-protected against login-CSRF.
+    Sets HttpOnly auth_token cookie and non-HttpOnly csrf_token cookie.
+    Returns safe user profile without exposing JWT in response body.
+    """
+    validate_origin(fastapi_req)
     client_ip = get_client_ip(fastapi_req)
     if register_limiter.is_rate_limited(client_ip):
         logger.warning(f"AUDIT | Action: rate_limit_exceeded | Key: {client_ip} | Limiter: register | Status: blocked")
@@ -54,11 +73,31 @@ def register(request: RegisterRequest, fastapi_req: Request, db: Session = Depen
             detail="Too many registration attempts. Please try again in an hour."
         )
     auth_service = AuthService(db)
-    return auth_service.register_user(request, client_ip)
+    user = auth_service.register_user(request, client_ip)
+
+    # Establish cookie-based session immediately for the browser
+    token_resp = auth_service.generate_token(user)
+    csrf_token = generate_csrf_token()
+    set_auth_cookie(response, token_resp.access_token)
+    set_csrf_cookie(response, csrf_token)
+
+    return user
 
 
-@router.post("/login", response_model=TokenResponse, status_code=status.HTTP_200_OK)
-def login(request: LoginRequest, fastapi_req: Request, db: Session = Depends(get_db)):
+@router.post("/login", response_model=UserResponse, status_code=status.HTTP_200_OK)
+def login(
+    request: LoginRequest,
+    fastapi_req: Request,
+    response: Response,
+    db: Session = Depends(get_db)
+):
+    """
+    Browser login endpoint (P2-1).
+    Origin-protected against login-CSRF.
+    Sets HttpOnly auth_token cookie and non-HttpOnly csrf_token cookie.
+    Returns safe user information. NEVER returns access_token in response JSON.
+    """
+    validate_origin(fastapi_req)
     client_ip = get_client_ip(fastapi_req)
 
     # Brute-force account lockout check
@@ -80,7 +119,16 @@ def login(request: LoginRequest, fastapi_req: Request, db: Session = Depends(get
     try:
         user = auth_service.authenticate_user(request, client_ip)
         AccountLockoutLimiter.reset_failed_attempts(request.email)
-        return auth_service.generate_token(user)
+
+        # Generate JWT and CSRF tokens
+        token_resp = auth_service.generate_token(user)
+        csrf_token = generate_csrf_token()
+
+        # Set secure transport cookies
+        set_auth_cookie(response, token_resp.access_token)
+        set_csrf_cookie(response, csrf_token)
+
+        return user
     except HTTPException as e:
         if e.status_code == 401:
             AccountLockoutLimiter.record_failed_attempt(request.email)
@@ -93,6 +141,11 @@ def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
+    """
+    Machine / API Client token issuance endpoint.
+    Used exclusively by automated/API clients via OAuth2 password flow.
+    Returns JWT access_token in JSON for Authorization: Bearer transport.
+    """
     client_ip = get_client_ip(fastapi_req)
 
     if AccountLockoutLimiter.is_locked_out(form_data.username):
@@ -128,17 +181,41 @@ def refresh_token(
     db: Session = Depends(get_db)
 ):
     """Refinement #9: Refresh Token Rotation & Family Replay Protection."""
+    validate_origin(fastapi_req)
     client_ip = get_client_ip(fastapi_req)
     ua = fastapi_req.headers.get("user-agent", "")
     sess_svc = SessionService(db)
     return sess_svc.rotate_refresh_token(req.refresh_token, user_agent=ua, client_ip=client_ip)
 
 
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Logout Current Browser")
+def logout(response: Response, fastapi_req: Request):
+    """
+    P2-1 Normal Browser Logout Semantics:
+    Clears the current browser's auth_token and csrf_token cookies.
+    DOES NOT invalidate refresh sessions on other devices and DOES NOT call logout_all_devices.
+
+    Stateless JWT Limitation:
+    The issued stateless JWT access token remains cryptographically valid until its exp
+    timestamp. After cookie deletion, the browser cannot send it, terminating the browser session.
+    """
+    clear_auth_cookies(response)
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return response
+
+
 @router.post("/logout-all", summary="Logout All Devices")
 def logout_all_devices(
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """
+    Global Logout Semantics:
+    Invalidates all UserSession refresh tokens across all devices in the database,
+    and clears the current browser's authentication cookies.
+    """
+    clear_auth_cookies(response)
     sess_svc = SessionService(db)
     sess_svc.logout_all_devices(current_user.id)
     return {"message": "Successfully logged out from all active device sessions."}
@@ -164,6 +241,7 @@ def forgot_password(
     Request password reset email.
     Enumeration-protected: returns identical success response regardless of email existence.
     """
+    validate_origin(fastapi_req)
     client_ip = get_client_ip(fastapi_req)
     if forgot_password_limiter.is_rate_limited(client_ip):
         logger.warning(
@@ -190,6 +268,7 @@ def reset_password(
     Reset user password using token from email.
     Validates token single-use status, expiration, and updates password.
     """
+    validate_origin(fastapi_req)
     client_ip = get_client_ip(fastapi_req)
     if reset_password_limiter.is_rate_limited(client_ip):
         logger.warning(
