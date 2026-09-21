@@ -12,6 +12,9 @@ class RoleRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    def get_by_id(self, role_id: int) -> Optional[Role]:
+        return self.db.query(Role).filter(Role.id == role_id).first()
+
     def get_by_name(self, name: str, org_id: Optional[int] = None) -> Optional[Role]:
         query = self.db.query(Role).filter(Role.name == name)
         if org_id is not None:

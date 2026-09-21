@@ -20,7 +20,13 @@ class SecurityContext:
 
     @property
     def is_super_admin(self) -> bool:
-        return "system.admin" in self.permissions
+        if "system.admin" in self.permissions:
+            return True
+        if self.user and getattr(self.user, "role_assignments", None):
+            for ur in self.user.role_assignments:
+                if getattr(ur, "role", None) and ur.role.name == "Super Admin":
+                    return True
+        return False
 
     def has_permission(self, perm: str) -> bool:
         return self.is_super_admin or (perm in self.permissions)

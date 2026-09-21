@@ -11,15 +11,16 @@ Exposes single AnalyticsService facade.
 
 import logging
 import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 
 from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
 from app.models.document_entity import DocumentEntity
 from app.models.document_metadata import DocumentMetadata
 from app.models.search_analytics import SearchAnalytics
+from app.models.organization import OrganizationMember
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,34 @@ class SearchAnalyticsSubservice:
         except Exception as e:
             logger.warning(f"Failed to record search analytics: {e}")
 
-    def get_search_metrics(self) -> Dict[str, Any]:
-        avg_latency = (
-            self.db.query(func.avg(SearchAnalytics.retrieval_latency_ms)).scalar() or 0.0
+    def get_search_metrics(self, org_id: Optional[int] = None) -> Dict[str, Any]:
+        avg_query = self.db.query(func.avg(SearchAnalytics.retrieval_latency_ms))
+        count_query = self.db.query(SearchAnalytics)
+        top_query = self.db.query(
+            SearchAnalytics.query, func.count(SearchAnalytics.id).label("count")
         )
-        total_queries = self.db.query(SearchAnalytics).count()
+
+        if org_id is not None:
+            sa_filter = or_(
+                SearchAnalytics.knowledge_base_id.in_(
+                    self.db.query(KnowledgeBase.id).filter(KnowledgeBase.organization_id == org_id)
+                ),
+                and_(
+                    SearchAnalytics.knowledge_base_id.is_(None),
+                    SearchAnalytics.user_id.in_(
+                        self.db.query(OrganizationMember.user_id).filter(OrganizationMember.organization_id == org_id)
+                    ),
+                ),
+            )
+            avg_query = avg_query.filter(sa_filter)
+            count_query = count_query.filter(sa_filter)
+            top_query = top_query.filter(sa_filter)
+
+        avg_latency = avg_query.scalar() or 0.0
+        total_queries = count_query.count()
 
         top_queries_query = (
-            self.db.query(SearchAnalytics.query, func.count(SearchAnalytics.id).label("count"))
-            .group_by(SearchAnalytics.query)
+            top_query.group_by(SearchAnalytics.query)
             .order_by(func.count(SearchAnalytics.id).desc())
             .limit(5)
             .all()
@@ -84,13 +104,19 @@ class KnowledgeAnalyticsSubservice:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_knowledge_metrics(self, owner_id: int | None = None) -> Dict[str, Any]:
+    def get_knowledge_metrics(
+        self, owner_id: int | None = None, org_id: int | None = None
+    ) -> Dict[str, Any]:
         kb_query = self.db.query(KnowledgeBase)
-        doc_query = self.db.query(Document)
+        doc_query = self.db.query(Document).join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+
+        if org_id is not None:
+            kb_query = kb_query.filter(KnowledgeBase.organization_id == org_id)
+            doc_query = doc_query.filter(KnowledgeBase.organization_id == org_id)
 
         if owner_id is not None:
             kb_query = kb_query.filter(KnowledgeBase.owner_id == owner_id)
-            doc_query = doc_query.join(KnowledgeBase).filter(KnowledgeBase.owner_id == owner_id)
+            doc_query = doc_query.filter(KnowledgeBase.owner_id == owner_id)
 
         total_kbs = kb_query.count()
         total_docs = doc_query.count()
@@ -114,9 +140,17 @@ class KnowledgeAnalyticsSubservice:
         ]
 
         # Top document categories
+        cat_query = self.db.query(
+            Document.classification, func.count(Document.id).label("count")
+        ).join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+
+        if org_id is not None:
+            cat_query = cat_query.filter(KnowledgeBase.organization_id == org_id)
+        if owner_id is not None:
+            cat_query = cat_query.filter(KnowledgeBase.owner_id == owner_id)
+
         categories_query = (
-            self.db.query(Document.classification, func.count(Document.id).label("count"))
-            .group_by(Document.classification)
+            cat_query.group_by(Document.classification)
             .order_by(func.count(Document.id).desc())
             .all()
         )
@@ -126,9 +160,23 @@ class KnowledgeAnalyticsSubservice:
         ]
 
         # Top entities
+        ent_query = (
+            self.db.query(
+                DocumentEntity.entity_text,
+                DocumentEntity.entity_type,
+                func.count(DocumentEntity.id).label("count"),
+            )
+            .join(Document, DocumentEntity.document_id == Document.id)
+            .join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+        )
+
+        if org_id is not None:
+            ent_query = ent_query.filter(KnowledgeBase.organization_id == org_id)
+        if owner_id is not None:
+            ent_query = ent_query.filter(KnowledgeBase.owner_id == owner_id)
+
         entities_query = (
-            self.db.query(DocumentEntity.entity_text, DocumentEntity.entity_type, func.count(DocumentEntity.id).label("count"))
-            .group_by(DocumentEntity.entity_text, DocumentEntity.entity_type)
+            ent_query.group_by(DocumentEntity.entity_text, DocumentEntity.entity_type)
             .order_by(func.count(DocumentEntity.id).desc())
             .limit(10)
             .all()
@@ -153,26 +201,62 @@ class UsageAnalyticsSubservice:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_usage_trends(self) -> Dict[str, Any]:
-        # Daily ingestion count for last 7 days
+    def get_usage_trends(self, org_id: Optional[int] = None) -> Dict[str, Any]:
+        # Daily ingestion count for last 7 days (consolidated into 2 range-based grouped queries)
         today = datetime.date.today()
+        start_date = today - datetime.timedelta(days=6)
+        start_dt = datetime.datetime.combine(start_date, datetime.time.min)
+
+        # 1. Single aggregate query for document creation counts across 7-day range
+        doc_q = (
+            self.db.query(
+                func.date(Document.created_at).label("day"),
+                func.count(Document.id).label("count"),
+            )
+            .join(KnowledgeBase, Document.knowledge_base_id == KnowledgeBase.id)
+            .filter(Document.created_at >= start_dt)
+        )
+        if org_id is not None:
+            doc_q = doc_q.filter(KnowledgeBase.organization_id == org_id)
+
+        doc_rows = doc_q.group_by(func.date(Document.created_at)).all()
+        doc_counts = {str(r[0]): int(r[1]) for r in doc_rows if r[0] is not None}
+
+        # 2. Single aggregate query for search queries count across 7-day range
+        search_q = (
+            self.db.query(
+                func.date(SearchAnalytics.created_at).label("day"),
+                func.count(SearchAnalytics.id).label("count"),
+            )
+            .filter(SearchAnalytics.created_at >= start_dt)
+        )
+        if org_id is not None:
+            sa_filter = or_(
+                SearchAnalytics.knowledge_base_id.in_(
+                    self.db.query(KnowledgeBase.id).filter(KnowledgeBase.organization_id == org_id)
+                ),
+                and_(
+                    SearchAnalytics.knowledge_base_id.is_(None),
+                    SearchAnalytics.user_id.in_(
+                        self.db.query(OrganizationMember.user_id).filter(OrganizationMember.organization_id == org_id)
+                    ),
+                ),
+            )
+            search_q = search_q.filter(sa_filter)
+
+        search_rows = search_q.group_by(func.date(SearchAnalytics.created_at)).all()
+        search_counts = {str(r[0]): int(r[1]) for r in search_rows if r[0] is not None}
+
         daily_questions = []
         storage_growth = []
 
         for i in range(6, -1, -1):
             day = today - datetime.timedelta(days=i)
             day_str = day.strftime("%b %d")
+            iso_date = day.isoformat()
 
-            doc_count = (
-                self.db.query(Document)
-                .filter(func.date(Document.created_at) == day)
-                .count()
-            )
-            query_count = (
-                self.db.query(SearchAnalytics)
-                .filter(func.date(SearchAnalytics.created_at) == day)
-                .count()
-            )
+            doc_count = doc_counts.get(iso_date, 0)
+            query_count = search_counts.get(iso_date, 0)
 
             daily_questions.append({"date": day_str, "count": query_count})
             storage_growth.append({"date": day_str, "count": doc_count * 2})  # approx MB
@@ -192,10 +276,12 @@ class AnalyticsService:
         self.knowledge_analytics = KnowledgeAnalyticsSubservice(db)
         self.usage_analytics = UsageAnalyticsSubservice(db)
 
-    def get_full_analytics(self, owner_id: int | None = None) -> Dict[str, Any]:
-        search_data = self.search_analytics.get_search_metrics()
-        knowledge_data = self.knowledge_analytics.get_knowledge_metrics(owner_id)
-        usage_data = self.usage_analytics.get_usage_trends()
+    def get_full_analytics(
+        self, owner_id: int | None = None, org_id: int | None = None
+    ) -> Dict[str, Any]:
+        search_data = self.search_analytics.get_search_metrics(org_id=org_id)
+        knowledge_data = self.knowledge_analytics.get_knowledge_metrics(owner_id=owner_id, org_id=org_id)
+        usage_data = self.usage_analytics.get_usage_trends(org_id=org_id)
 
         return {
             **search_data,

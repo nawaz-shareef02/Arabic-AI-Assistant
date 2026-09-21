@@ -113,6 +113,11 @@ def get_organization_members(
     db: Session = Depends(get_db),
     user=Depends(require_permission("users.manage")),
 ):
+    if not sec_ctx.is_super_admin and sec_ctx.org_id != org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You cannot access members of another organization.",
+        )
     svc = OrganizationService(db)
     return svc.get_organization_members(org_id)
 
@@ -125,6 +130,11 @@ def get_organization_activity(
     db: Session = Depends(get_db),
     user=Depends(require_permission("analytics.view")),
 ):
+    if not sec_ctx.is_super_admin and sec_ctx.org_id != org_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: You cannot access activity of another organization.",
+        )
     svc = OrganizationService(db)
     return svc.get_activity_feed(org_id, limit=limit)
 

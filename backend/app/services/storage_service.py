@@ -280,3 +280,34 @@ class StorageService:
 
         return target_path.replace("\\", "/")
 
+    def delete_file(self, file_path: str) -> bool:
+        """
+        Safely and idempotently removes an uploaded physical file from disk.
+        Returns True if deleted, False if already missing or invalid.
+        Guarantees path traversal prevention.
+        """
+        if not file_path:
+            return False
+        try:
+            target_path = os.path.abspath(file_path)
+            upload_root = os.path.abspath(settings.UPLOAD_DIR)
+            if not target_path.startswith(upload_root):
+                logger.warning(
+                    f"AUDIT | Action: delete_file_traversal_blocked | Path: {file_path} | Status: rejected"
+                )
+                return False
+
+            if os.path.isfile(target_path):
+                os.remove(target_path)
+                logger.info(
+                    f"AUDIT | Action: delete_file | Path: {file_path} | Status: success"
+                )
+                return True
+            else:
+                logger.info(
+                    f"StorageService: File not found on disk for deletion (already missing): {file_path}"
+                )
+                return False
+        except Exception as exc:
+            logger.warning(f"StorageService: Error deleting file {file_path}: {exc}")
+            return False

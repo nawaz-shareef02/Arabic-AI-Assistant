@@ -180,6 +180,21 @@ class SearchService:
             limit=effective_top_k,
         )
 
+        if results and self.db is not None:
+            chunk_ids = [r.id for r in results if getattr(r, "id", None) is not None]
+            if chunk_ids:
+                try:
+                    active_ids = {
+                        row[0]
+                        for row in self.db.query(DocumentChunk.id)
+                        .filter(DocumentChunk.id.in_(chunk_ids))
+                        .all()
+                    }
+                    if len(active_ids) < len(chunk_ids):
+                        results = [r for r in results if r.id in active_ids]
+                except Exception as exc:
+                    logger.warning(f"Error checking active chunks for semantic_search: {exc}")
+
         return results
 
     # ------------------------------------------------------------------
@@ -440,6 +455,26 @@ class SearchService:
                     vector_score=float(item.score) if debug else None,
                 )
             )
+
+        # SEC-REQ-04: Defense-in-depth to filter out orphaned Qdrant vectors whose PostgreSQL rows were deleted
+        if results and self.db is not None:
+            chunk_ids = [r.chunk_id for r in results if r.chunk_id]
+            if chunk_ids:
+                try:
+                    active_ids = {
+                        row[0]
+                        for row in self.db.query(DocumentChunk.id)
+                        .filter(DocumentChunk.id.in_(chunk_ids))
+                        .all()
+                    }
+                    if len(active_ids) < len(chunk_ids):
+                        orphaned = [r for r in results if r.chunk_id not in active_ids]
+                        logger.warning(
+                            f"SEC-REQ-04: Filtered {len(orphaned)} orphaned vector(s) for deleted documents from dense retrieval."
+                        )
+                        results = [r for r in results if r.chunk_id in active_ids]
+                except Exception as exc:
+                    logger.warning(f"Error checking active chunks for dense results: {exc}")
 
         return results
 

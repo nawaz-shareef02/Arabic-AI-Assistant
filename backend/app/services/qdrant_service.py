@@ -262,38 +262,43 @@ class QdrantService:
     def delete_document_vectors(
         self,
         parsed_document_id: int,
-    ):
-
-        self.client.delete(
-
-            collection_name=self.collection_name,
-
-            points_selector={
-
-                "filter": {
-
-                    "must": [
-
-                        {
-
-                            "key": "parsed_document_id",
-
-                            "match": {
-
-                                "value": parsed_document_id
-
-                            }
-
-                        }
-
-                    ]
-
+        organization_id: Optional[int] = None,
+        knowledge_base_id: Optional[int] = None,
+    ) -> bool:
+        must_conditions: List[dict] = [
+            {
+                "key": "parsed_document_id",
+                "match": {
+                    "value": parsed_document_id
                 }
+            }
+        ]
+        if organization_id is not None:
+            must_conditions.append({
+                "key": "organization_id",
+                "match": {"value": organization_id}
+            })
+        if knowledge_base_id is not None:
+            must_conditions.append({
+                "key": "knowledge_base_id",
+                "match": {"value": knowledge_base_id}
+            })
 
-            },
-
-        )
-
-        logger.info(
-            f"Vectors removed for ParsedDocument {parsed_document_id}"
-        )
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector={
+                    "filter": {
+                        "must": must_conditions
+                    }
+                },
+            )
+            logger.info(
+                f"Vectors removed for ParsedDocument {parsed_document_id} (Org: {organization_id}, KB: {knowledge_base_id})"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                f"QdrantService: delete_document_vectors encountered error for ParsedDocument {parsed_document_id}: {exc}"
+            )
+            return False

@@ -10,10 +10,15 @@ from app.models.knowledge_base import KnowledgeBase
 from app.schemas.document import DocumentCreate, DocumentUpdate, DocumentStatus
 from app.crud import document as crud_doc
 from app.services.storage_service import StorageService
+from app.services.qdrant_service import QdrantService
+
+logger = logging.getLogger(__name__)
 
 class DocumentService:
     def __init__(self, db: Session):
         self.db = db
+        self.storage_service = StorageService()
+        self.qdrant_service = QdrantService()
 
     def _get_kb_or_raise(self, kb_uuid: py_uuid.UUID, owner_id: int) -> KnowledgeBase:
         kb = self.db.query(KnowledgeBase).filter(
@@ -175,5 +180,55 @@ class DocumentService:
         return crud_doc.update_doc(self.db, doc, doc_in, owner_id, new_kb_id)
 
     def delete_doc(self, doc_uuid: py_uuid.UUID, owner_id: int) -> None:
+        """
+        Idempotent and failure-safe document deletion (SEC-REQ-04).
+
+        Consistency Ordering & Failure Mode Semantics:
+        1. Extract metadata (storage_path, parsed_document_id, kb_id, org_id) before
+           PostgreSQL cascades execute.
+        2. Delete and commit the PostgreSQL document record first.
+           - Ensures DB connection/locks are NOT held during external disk/network I/O.
+           - Guarantees that if a PostgreSQL error/rollback occurs, the system does NOT
+             permanently lose physical files or Qdrant vectors.
+        3. Delete Qdrant vector points idempotently.
+           - Safely catches and logs errors; missing points/collection do not crash.
+        4. Delete physical file from storage idempotently.
+           - Safely catches and logs errors; missing files do not crash.
+        Residual Failure Mode:
+        - If Qdrant or filesystem cleanup encounters transient downtime after PostgreSQL
+          deletion has committed, the document is already non-existent in PostgreSQL (preventing
+          API retrieval or FTS matches), and residual vectors/files can be pruned without
+          inconsistent database references.
+        """
         doc = self.get_doc(doc_uuid, owner_id)
+
+        # 1. Pre-fetch cascading attributes before database deletion
+        storage_path = doc.storage_path
+        parsed_doc_id = doc.parsed_document.id if doc.parsed_document else None
+        kb_id = doc.knowledge_base_id
+        org_id = doc.knowledge_base.organization_id if doc.knowledge_base else None
+
+        # 2. Delete and commit PostgreSQL record first (releases DB transaction)
         crud_doc.delete_doc(self.db, doc)
+
+        # 3. Clean up Qdrant vector points associated with this document (idempotent & safe)
+        if parsed_doc_id is not None:
+            try:
+                self.qdrant_service.delete_document_vectors(
+                    parsed_document_id=parsed_doc_id,
+                    organization_id=org_id,
+                    knowledge_base_id=kb_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Safe cleanup: failed to delete Qdrant vectors for parsed_doc {parsed_doc_id} (doc_uuid: {doc_uuid}): {exc}"
+                )
+
+        # 4. Clean up physical stored file on disk (idempotent & safe)
+        if storage_path:
+            try:
+                self.storage_service.delete_file(storage_path)
+            except Exception as exc:
+                logger.warning(
+                    f"Safe cleanup: failed to delete physical file {storage_path} (doc_uuid: {doc_uuid}): {exc}"
+                )
