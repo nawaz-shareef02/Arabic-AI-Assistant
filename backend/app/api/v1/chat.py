@@ -1,36 +1,34 @@
 """
-Chat API Router — Production-Hardened for P0-1 Security Sprint.
+Chat API Router — Production-Hardened for P0-1 Security and P1-2 Distributed Rate Limiting.
 
-Authentication & Authorization
--------------------------------
-Both endpoints now require a valid JWT (via ``get_current_user``).
-Authorization is enforced **before** any RAG or LLM call:
+Authentication, Authorization & Abuse-Control Pipeline:
+--------------------------------------------------------
+Both endpoints strictly enforce the following security pipeline:
 
   Request
-    ↓  get_current_user   → 401 if unauthenticated
-  Current User
-    ↓  authorize_knowledge_base_access()  → 403 if unauthorized
+    ↓  get_current_user              → 401 Unauthorized (if missing or invalid JWT)
+  Authenticated User
+    ↓  authorize_knowledge_base_access() → 403 Forbidden (if unauthorized / cross-org)
   Verified KnowledgeBase
-    ↓  authorize_conversation_access()    → 403 if unauthorized
-       (only when conversation_id is supplied)
+    ↓  ChatRateLimitService          → 429 Too Many Requests (if rate/concurrency limit hit)
+  Rate Limit / Concurrency Acquired
+    ↓  PromptSecurityService         → 400 Bad Request (if prompt injection / jailbreak)
+  Safe Prompt
+    ↓  authorize_conversation_access() → 403 Forbidden (if conversational & mismatched)
   Verified Conversation
-    ↓  RAG / LLM
-  Response
+    ↓  RAG / LLM Execution
+  Response / Stream (Guaranteed release of concurrency leases in `finally:`)
 
-The streaming endpoint enforces all authorization checks synchronously
-before the StreamingResponse generator is created, so no Qdrant retrieval
-or LLM tokens are ever produced for an unauthorized request.
-
-Endpoints
+Endpoints:
 ---------
 POST /chat/        — Non-streaming RAG (stateless + conversational)
-POST /chat/stream  — Streaming RAG (stateless + conversational)
+POST /chat/stream  — Streaming RAG with active concurrency lease management
 """
 
 import logging
-import traceback
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -45,6 +43,8 @@ from app.services.chat_authorization_service import (
     authorize_knowledge_base_access,
     authorize_conversation_access,
 )
+from app.services.prompt_security_service import PromptSecurityService
+from app.services.chat_rate_limit_service import ChatRateLimitService
 from app.crud.conversation import ConversationRepository
 
 logger = logging.getLogger(__name__)
@@ -66,20 +66,20 @@ router = APIRouter(
 )
 def chat(
     request: ChatRequest,
+    response: Response,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),  # ← P0-1: authentication
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Non-streaming RAG chat.
+    Non-streaming RAG chat with distributed sliding-window rate limiting.
 
-    **Authentication**: Bearer token required (HTTP 401 if missing/invalid).
-    **Authorization**: The authenticated user must own the requested knowledge
-    base (HTTP 403 otherwise).  When ``conversation_id`` is provided, the
-    conversation must also belong to the same user and the same KB (HTTP 403).
-
-    Stateless mode   — ``conversation_id`` absent  → original behavior preserved.
-    Conversational   — ``conversation_id`` present → history-aware RAG with DB
-                       persistence.
+    Pipeline:
+      1. Authenticate (HTTP 401)
+      2. Authorize Knowledge Base access (HTTP 403)
+      3. Rate Limit evaluation (HTTP 429)
+      4. Prompt Security validation (HTTP 400)
+      5. Authorize Conversation access if present (HTTP 403)
+      6. Run RAG retrieval and LLM inference
     """
     try:
         # ── Step 1: Authorize KB access ──────────────────────────────────────
@@ -88,6 +88,45 @@ def chat(
             knowledge_base_id=request.knowledge_base_id,
             current_user=current_user,
         )
+
+        # ── Step 1.2: Rate Limit Decision (P1-2) ──────────────────────────────
+        rate_service = ChatRateLimitService()
+        rate_res = rate_service.check_chat_rate_limit(
+            user_id=current_user.id,
+            org_id=authorized_kb.organization_id,
+        )
+        if not rate_res.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=rate_res.detail or "Too many AI requests. Please retry later.",
+                headers=rate_res.headers,
+            )
+
+        # Attach rate-limit headers to response
+        for k, v in rate_res.headers.items():
+            response.headers[k] = v
+
+        # ── Step 1.5: Validate Prompt Security (P0-3) ────────────────────────
+        sec = PromptSecurityService(db)
+        decision = sec.process_prompt(
+            prompt=request.question,
+            user=current_user,
+            kb_id=authorized_kb.id,
+            org_id=authorized_kb.organization_id,
+        )
+        if decision["decision"] in ("BLOCKED", "DENIED"):
+            logger.warning(
+                "AUDIT_CHAT | Action: prompt_rejected | User: %s | Decision: %s "
+                "| Reason: %s | Risk: %.2f",
+                current_user.email,
+                decision["decision"],
+                decision["reason"],
+                decision["risk_score"],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Request blocked: {decision['reason']}",
+            )
 
         rag = RAGService(db)
 
@@ -107,10 +146,10 @@ def chat(
                 conversation_id=request.conversation_id,
                 user_id=current_user.id,
                 organization_id=authorized_kb.organization_id,
+                user=current_user,
             )
 
-            _post_message_tasks(
-                db=db,
+            _post_message_tasks_new_session(
                 conversation_id=request.conversation_id,
                 first_question=request.question,
             )
@@ -122,6 +161,7 @@ def chat(
             question=request.question,
             knowledge_base_id=authorized_kb.id,
             organization_id=authorized_kb.organization_id,
+            user=current_user,
         )
 
     except HTTPException:
@@ -145,19 +185,16 @@ def chat(
 def stream_chat(
     request: ChatRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),  # ← P0-1: authentication
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Streaming RAG chat.
+    Streaming RAG chat with active stream concurrency management and lease reclamation.
 
-    **Authentication**: Bearer token required (HTTP 401 if missing/invalid).
-    **Authorization**: Enforced *synchronously* before the StreamingResponse
-    generator is created — no Qdrant retrieval or LLM tokens are produced for
-    an unauthorized request.
-
-    Stateless mode   — ``conversation_id`` absent  → original streaming behavior.
-    Conversational   — ``conversation_id`` present → history-aware streaming
-                       with DB persistence (message saved ONLY on success).
+    Guarantees:
+      1. All authorization checks executed before stream generator instantiation.
+      2. Concurrency slot reserved before streaming begins.
+      3. Concurrency slot released in `finally:` block regardless of whether stream
+         completes normally, encounters an error, or the client disconnects.
     """
     try:
         # ── Step 1: Authorize KB access (before generator) ───────────────────
@@ -167,53 +204,105 @@ def stream_chat(
             current_user=current_user,
         )
 
+        # ── Step 1.2: Rate Limit & Stream Concurrency Acquisition (P1-2) ──────
+        rate_service = ChatRateLimitService()
+        rate_res = rate_service.check_and_acquire_stream_slot(
+            user_id=current_user.id,
+            org_id=authorized_kb.organization_id,
+        )
+        if not rate_res.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=rate_res.detail or "Too many AI requests. Please retry later.",
+                headers=rate_res.headers,
+            )
+
+        lease_id = rate_res.lease_id
+        user_id = current_user.id
+        org_id = authorized_kb.organization_id
+        kb_id = authorized_kb.id
+        question = request.question
+
+        # ── Step 1.5: Validate Prompt Security (synchronously before streaming) ──
+        sec = PromptSecurityService(db)
+        decision = sec.process_prompt(
+            prompt=request.question,
+            user=current_user,
+            kb_id=authorized_kb.id,
+            org_id=authorized_kb.organization_id,
+        )
+        if decision["decision"] in ("BLOCKED", "DENIED"):
+            rate_service.release_stream_slot(lease_id, user_id, org_id)
+            logger.warning(
+                "AUDIT_CHAT | Action: prompt_rejected_stream | User: %s | Decision: %s "
+                "| Reason: %s | Risk: %.2f",
+                current_user.email,
+                decision["decision"],
+                decision["reason"],
+                decision["risk_score"],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Request blocked: {decision['reason']}",
+            )
+
         rag = RAGService(db)
 
         if request.conversation_id is not None:
             # ── Step 2: Authorize conversation access (before generator) ─────
-            authorize_conversation_access(
-                db,
-                conversation_id=request.conversation_id,
-                current_user=current_user,
-                authorized_kb=authorized_kb,
-            )
+            try:
+                authorize_conversation_access(
+                    db,
+                    conversation_id=request.conversation_id,
+                    current_user=current_user,
+                    authorized_kb=authorized_kb,
+                )
+            except Exception:
+                rate_service.release_stream_slot(lease_id, user_id, org_id)
+                raise
 
-            # Authorization passed — now safe to build the streaming generator.
-            kb_id = authorized_kb.id
             conversation_id = request.conversation_id
-            user_id = current_user.id
-            question = request.question
-            org_id = authorized_kb.organization_id
 
             def stream_and_post_process():
-                """Wrap the generator so post-processing runs after stream ends."""
-                yield from rag.stream_ask_with_history(
-                    question=question,
-                    knowledge_base_id=kb_id,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
-                # After stream completes: update last_message_at + generate title.
-                # Use a fresh DB session — the streaming session may be closed.
-                _post_message_tasks_new_session(
-                    conversation_id=conversation_id,
-                    first_question=question,
-                )
+                """Wrap the generator so post-processing and concurrency release run cleanly."""
+                try:
+                    yield from rag.stream_ask_with_history(
+                        question=question,
+                        knowledge_base_id=kb_id,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        organization_id=org_id,
+                        user=current_user,
+                    )
+                    _post_message_tasks_new_session(
+                        conversation_id=conversation_id,
+                        first_question=question,
+                    )
+                finally:
+                    rate_service.release_stream_slot(lease_id, user_id, org_id)
 
             return StreamingResponse(
                 stream_and_post_process(),
                 media_type="text/plain",
+                headers=rate_res.headers,
             )
 
-        # ── Stateless streaming (backward compatible) ─────────────────────────
+        # ── Stateless streaming ──────────────────────────────────────────────
+        def stateless_stream():
+            try:
+                yield from rag.stream_ask(
+                    question=question,
+                    knowledge_base_id=kb_id,
+                    organization_id=org_id,
+                    user=current_user,
+                )
+            finally:
+                rate_service.release_stream_slot(lease_id, user_id, org_id)
+
         return StreamingResponse(
-            rag.stream_ask(
-                question=request.question,
-                knowledge_base_id=authorized_kb.id,
-                organization_id=authorized_kb.organization_id,
-            ),
+            stateless_stream(),
             media_type="text/plain",
+            headers=rate_res.headers,
         )
 
     except HTTPException:
@@ -249,7 +338,6 @@ def _post_message_tasks(
             title = TitleService().generate(first_question)
             svc.set_title_if_empty(conversation_id, title)
     except Exception as exc:
-        # Never let metadata failures propagate to the caller.
         logger.warning("Post-message tasks failed (non-fatal): %s", exc)
 
 
