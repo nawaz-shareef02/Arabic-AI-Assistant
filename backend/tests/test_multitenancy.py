@@ -261,3 +261,49 @@ def test_streaming_chat_endpoint_blocks_cross_org_access(client, db_session):
         headers=headers,
     )
     assert stream_resp.status_code == 403
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Test 10: Document Relationship Candidate Search Multi-Tenant Isolation
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_document_relationship_passes_tenant_boundaries_to_qdrant(db_session):
+    """Test 10 — DocumentRelationshipService must pass both organization_id and knowledge_base_id to QdrantService.search."""
+    from app.services.document_relationship_service import DocumentRelationshipService
+
+    org_a, _, _, _, kb_a, _, _, _ = _seed_tenant_data(db_session)
+
+    source_doc = Document(
+        filename="tenant_doc.pdf",
+        storage_path="/tmp/tenant_doc.pdf",
+        mime_type="application/pdf",
+        file_size=1024,
+        knowledge_base_id=kb_a.id,
+    )
+    db_session.add(source_doc)
+    db_session.commit()
+
+    parsed_doc = ParsedDocument(
+        document_id=source_doc.id,
+        parsed_text="Organizational policy on enterprise data boundaries.",
+        char_count=52,
+        processing_duration=0.1,
+    )
+    db_session.add(parsed_doc)
+    db_session.commit()
+    db_session.refresh(source_doc)
+
+    with patch("app.services.document_relationship_service.QdrantService") as mock_qdrant_cls, \
+         patch("app.services.document_relationship_service.EmbeddingService") as mock_embedding_cls:
+        mock_qdrant = mock_qdrant_cls.return_value
+        mock_qdrant.search.return_value = []
+        mock_embedding = mock_embedding_cls.return_value
+        mock_embedding.embed_text.return_value = [0.1] * 384
+
+        rel_service = DocumentRelationshipService(db_session)
+        rel_service.detect_relationships(source_doc.id)
+
+        mock_qdrant.search.assert_called_once()
+        _, search_kwargs = mock_qdrant.search.call_args
+        assert search_kwargs.get("organization_id") == org_a.id
+        assert search_kwargs.get("knowledge_base_id") == kb_a.id

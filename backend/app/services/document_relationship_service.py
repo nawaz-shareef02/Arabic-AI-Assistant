@@ -50,6 +50,7 @@ class DocumentRelationshipService:
             return []
 
         kb_id = source_doc.knowledge_base_id
+        org_id = source_doc.knowledge_base.organization_id if source_doc.knowledge_base else None
         parsed_text = source_doc.parsed_document.parsed_text
 
         sample_query_text = parsed_text[:1000]
@@ -60,6 +61,7 @@ class DocumentRelationshipService:
             candidate_points = self.qdrant_service.search(
                 query_vector=query_vector,
                 knowledge_base_id=kb_id,
+                organization_id=org_id,
                 limit=15,
             )
         except Exception as exc:

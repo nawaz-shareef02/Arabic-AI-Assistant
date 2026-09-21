@@ -12,7 +12,10 @@ def get_user_organization_id(db: Session, user_id: int) -> int:
     member = db.query(OrganizationMember).filter(OrganizationMember.user_id == user_id).first()
     if member:
         return member.organization_id
-    return 1
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Access denied: user is not a member of any organization."
+    )
 
 
 class KnowledgeBaseService:
@@ -26,9 +29,6 @@ class KnowledgeBaseService:
     def get_kb(self, kb_uuid: py_uuid.UUID, owner_id: int) -> KnowledgeBase:
         org_id = get_user_organization_id(self.db, owner_id)
         kb = crud_kb.get_kb_by_uuid(self.db, kb_uuid, organization_id=org_id)
-        if not kb:
-            # Fallback check by owner_id for legacy test session compatibility
-            kb = crud_kb.get_kb_by_uuid(self.db, kb_uuid, owner_id=owner_id)
         if not kb:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
