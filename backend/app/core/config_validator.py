@@ -33,9 +33,14 @@ def validate_startup_configuration() -> str:
             raise ValueError(msg)
         logger.warning(msg)
 
-    if env_name in [SecurityProfile.STAGING, SecurityProfile.PRODUCTION]:
+    if env_name in [SecurityProfile.STAGING, SecurityProfile.PRODUCTION] or settings.ENVIRONMENT.lower() == "production":
         if "secret" in secret_key.lower() or "change" in secret_key.lower():
             raise ValueError("SECURITY_ERROR | Weak or default SECRET_KEY detected in production profile!")
+        if not settings.AUTH_COOKIE_SECURE:
+            raise ValueError("SECURITY_ERROR | AUTH_COOKIE_SECURE must be True in production profile!")
+
+    if settings.AUTH_COOKIE_SAMESITE.lower() == "none" and not settings.AUTH_COOKIE_SECURE:
+        raise ValueError("SECURITY_ERROR | SameSite=None requires AUTH_COOKIE_SECURE=True!")
 
     logger.info(f"SECURITY_CONFIG | Profile: {env_name} | Startup validation PASSED.")
     return env_name

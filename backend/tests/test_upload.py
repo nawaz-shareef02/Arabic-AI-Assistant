@@ -108,7 +108,7 @@ def test_successful_uploads(client, db_session):
     assert data["language"] is None
 
     # 3. Test DOCX upload
-    docx_content = b"docx binary content"
+    docx_content = b"PK\x03\x04\x14\x00\x00\x00\x08\x00docx binary content"
     response = client.post(
         "/api/v1/documents/upload",
         headers=headers,
