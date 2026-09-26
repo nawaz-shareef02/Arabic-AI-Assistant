@@ -10,7 +10,12 @@ from requests.exceptions import RequestException, Timeout
 from urllib3.util.retry import Retry
 
 from app.core.config import settings
-from app.services.llm.base import BaseLLMProvider
+from app.services.llm.base import (
+    BaseLLMProvider,
+    GenerationResult,
+    StreamingResult,
+    TokenUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +308,7 @@ class OllamaProvider(BaseLLMProvider):
         prompt: str,
         temperature: float = settings.LLM_TEMPERATURE,
         max_tokens: int = settings.LLM_MAX_TOKENS,
-    ) -> str:
+    ) -> GenerationResult:
         with self._acquire_inference_slot():
             payload = {
                 "model": self.model,
@@ -331,6 +336,35 @@ class OllamaProvider(BaseLLMProvider):
                 data: dict[str, Any] = response.json()
                 answer = _strip_think_tags(data.get("response", ""))
 
+                # Authoritative Ollama token metadata extraction
+                pec = data.get("prompt_eval_count")
+                prompt_eval_count = pec if isinstance(pec, int) else None
+
+                ec = data.get("eval_count")
+                eval_count = ec if isinstance(ec, int) else None
+
+                ped = data.get("prompt_eval_duration")
+                prompt_eval_duration = ped if isinstance(ped, int) else None
+
+                ed = data.get("eval_duration")
+                eval_duration = ed if isinstance(ed, int) else None
+
+                total_tokens = (
+                    prompt_eval_count + eval_count
+                    if prompt_eval_count is not None and eval_count is not None
+                    else None
+                )
+
+                token_usage = TokenUsage(
+                    prompt_tokens=prompt_eval_count,
+                    completion_tokens=eval_count,
+                    total_tokens=total_tokens,
+                    prompt_eval_duration=prompt_eval_duration,
+                    eval_duration=eval_duration,
+                    is_terminal=True,
+                    is_exact=(prompt_eval_count is not None and eval_count is not None),
+                )
+
                 # Instrument: success path.
                 try:
                     from app.core.prometheus_exporter import metrics_registry
@@ -343,8 +377,7 @@ class OllamaProvider(BaseLLMProvider):
                     ).observe(duration)
                     # Ollama returns eval_count (generated tokens) in the response.
                     # Use it when available — no secondary tokenization.
-                    eval_count = data.get("eval_count")
-                    if isinstance(eval_count, int) and eval_count > 0:
+                    if eval_count is not None and eval_count > 0:
                         metrics_registry.llm_tokens_generated_total.labels(
                             model=self.model
                         ).inc(eval_count)
@@ -352,7 +385,11 @@ class OllamaProvider(BaseLLMProvider):
                     pass  # Never fail LLM generation due to metrics error.
 
                 logger.info("LLM response generated successfully.")
-                return answer
+                return GenerationResult(
+                    text=answer,
+                    token_usage=token_usage,
+                    model=self.model,
+                )
 
             except Timeout:
                 try:
@@ -388,6 +425,7 @@ class OllamaProvider(BaseLLMProvider):
                 raise
 
 
+
     # ------------------------------------------------------------------
     # Stream Generate
     # ------------------------------------------------------------------
@@ -397,7 +435,7 @@ class OllamaProvider(BaseLLMProvider):
         prompt: str,
         temperature: float = settings.LLM_TEMPERATURE,
         max_tokens: int = settings.LLM_MAX_TOKENS,
-    ) -> Generator[str, None, None]:
+    ) -> StreamingResult:
         """
         Stream tokens from Ollama.
 
@@ -413,68 +451,114 @@ class OllamaProvider(BaseLLMProvider):
         - Outcome: success | timeout | error | cancelled (GeneratorExit).
         - Token count: from Ollama eval_count on final done=true chunk.
         """
-        with self._acquire_inference_slot():
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": True,
-                "think": False,  # ROOT-level — correctly suppresses Qwen3 thinking on Ollama 0.33.3
-                "keep_alive": settings.OLLAMA_KEEP_ALIVE,
-                "options": _build_options(
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                ),
-            }
+        usage_box: list[Optional[TokenUsage]] = [None]
 
-            t0 = time.perf_counter()
-            outcome = "success"  # updated in except blocks before re-raise
-            first_token_recorded = False
-            eval_count: int = 0  # from Ollama final chunk
+        def _generator() -> Generator[str, None, None]:
+            with self._acquire_inference_slot():
+                payload = {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "think": False,  # ROOT-level — correctly suppresses Qwen3 thinking on Ollama 0.33.3
+                    "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+                    "options": _build_options(
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ),
+                }
 
-            try:
-                logger.info("Starting Ollama streaming (think=False)...")
+                t0 = time.perf_counter()
+                outcome = "success"  # updated in except blocks before re-raise
+                first_token_recorded = False
+                eval_count: int = 0  # from Ollama final chunk
+                terminal_received = False
 
-                with self._session.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                    stream=True,
-                    timeout=self.request_timeout,
-                ) as response:
+                try:
+                    logger.info("Starting Ollama streaming (think=False)...")
 
-                    response.raise_for_status()
+                    with self._session.post(
+                        f"{self.base_url}/api/generate",
+                        json=payload,
+                        stream=True,
+                        timeout=self.request_timeout,
+                    ) as response:
 
-                    # Stateful <think> block filter — buffers tokens inside a
-                    # <think> block and discards them, yielding only real answer
-                    # tokens. This is a defensive layer; with think=False Ollama
-                    # should not emit any <think> tokens at all.
-                    inside_think = False
-                    think_buf = ""
+                        response.raise_for_status()
 
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
+                        # Stateful <think> block filter — buffers tokens inside a
+                        # <think> block and discards them, yielding only real answer
+                        # tokens. This is a defensive layer; with think=False Ollama
+                        # should not emit any <think> tokens at all.
+                        inside_think = False
+                        think_buf = ""
 
-                        chunk = json.loads(line.decode("utf-8"))
-                        token = chunk.get("response", "")
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
 
-                        # Capture token count from final chunk (done=true).
-                        if chunk.get("done"):
-                            ec = chunk.get("eval_count")
-                            if isinstance(ec, int) and ec > 0:
-                                eval_count = ec
+                            chunk = json.loads(line.decode("utf-8"))
+                            token = chunk.get("response", "")
 
-                        if not token:
-                            continue
+                            # Capture token count and terminal metadata on done=true
+                            if chunk.get("done"):
+                                terminal_received = True
+                                pec = chunk.get("prompt_eval_count")
+                                prompt_eval_count = pec if isinstance(pec, int) else None
 
-                        # --- think-tag filtering ---
-                        if inside_think:
-                            think_buf += token
-                            if "</think>" in think_buf:
-                                # Emit everything AFTER the closing tag.
-                                after = think_buf.split("</think>", 1)[1]
-                                inside_think = False
-                                think_buf = ""
-                                if after:
+                                ec = chunk.get("eval_count")
+                                eval_count_val = ec if isinstance(ec, int) else None
+                                if eval_count_val is not None and eval_count_val > 0:
+                                    eval_count = eval_count_val
+
+                                ped = chunk.get("prompt_eval_duration")
+                                prompt_eval_duration = ped if isinstance(ped, int) else None
+
+                                ed = chunk.get("eval_duration")
+                                eval_duration = ed if isinstance(ed, int) else None
+
+                                total_tokens = (
+                                    prompt_eval_count + eval_count_val
+                                    if prompt_eval_count is not None and eval_count_val is not None
+                                    else None
+                                )
+
+                                usage_box[0] = TokenUsage(
+                                    prompt_tokens=prompt_eval_count,
+                                    completion_tokens=eval_count_val,
+                                    total_tokens=total_tokens,
+                                    prompt_eval_duration=prompt_eval_duration,
+                                    eval_duration=eval_duration,
+                                    is_terminal=True,
+                                    is_exact=(prompt_eval_count is not None and eval_count_val is not None),
+                                )
+
+                            if not token:
+                                continue
+
+                            # --- think-tag filtering ---
+                            if inside_think:
+                                think_buf += token
+                                if "</think>" in think_buf:
+                                    # Emit everything AFTER the closing tag.
+                                    after = think_buf.split("</think>", 1)[1]
+                                    inside_think = False
+                                    think_buf = ""
+                                    if after:
+                                        if not first_token_recorded:
+                                            try:
+                                                from app.core.prometheus_exporter import metrics_registry
+                                                metrics_registry.llm_first_token_seconds.labels(
+                                                    model=self.model
+                                                ).observe(time.perf_counter() - t0)
+                                            except Exception:
+                                                pass
+                                            first_token_recorded = True
+                                        yield after
+                                continue
+
+                            if "<think>" in token:
+                                parts = token.split("<think>", 1)
+                                if parts[0]:
                                     if not first_token_recorded:
                                         try:
                                             from app.core.prometheus_exporter import metrics_registry
@@ -484,82 +568,88 @@ class OllamaProvider(BaseLLMProvider):
                                         except Exception:
                                             pass
                                         first_token_recorded = True
-                                    yield after
-                            continue
+                                    yield parts[0]
+                                inside_think = True
+                                think_buf = parts[1] if len(parts) > 1 else ""
+                                # Check if the think block also closes on the same token.
+                                if "</think>" in think_buf:
+                                    after = think_buf.split("</think>", 1)[1]
+                                    inside_think = False
+                                    think_buf = ""
+                                    if after:
+                                        yield after
+                                continue
 
-                        if "<think>" in token:
-                            parts = token.split("<think>", 1)
-                            if parts[0]:
-                                if not first_token_recorded:
-                                    try:
-                                        from app.core.prometheus_exporter import metrics_registry
-                                        metrics_registry.llm_first_token_seconds.labels(
-                                            model=self.model
-                                        ).observe(time.perf_counter() - t0)
-                                    except Exception:
-                                        pass
-                                    first_token_recorded = True
-                                yield parts[0]
-                            inside_think = True
-                            think_buf = parts[1] if len(parts) > 1 else ""
-                            # Check if the think block also closes on the same token.
-                            if "</think>" in think_buf:
-                                after = think_buf.split("</think>", 1)[1]
-                                inside_think = False
-                                think_buf = ""
-                                if after:
-                                    yield after
-                            continue
+                            # Normal token — record TTFT on first, then yield.
+                            if not first_token_recorded:
+                                try:
+                                    from app.core.prometheus_exporter import metrics_registry
+                                    metrics_registry.llm_first_token_seconds.labels(
+                                        model=self.model
+                                    ).observe(time.perf_counter() - t0)
+                                except Exception:
+                                    pass
+                                first_token_recorded = True
+                            yield token
 
-                        # Normal token — record TTFT on first, then yield.
-                        if not first_token_recorded:
-                            try:
-                                from app.core.prometheus_exporter import metrics_registry
-                                metrics_registry.llm_first_token_seconds.labels(
-                                    model=self.model
-                                ).observe(time.perf_counter() - t0)
-                            except Exception:
-                                pass
-                            first_token_recorded = True
-                        yield token
+                    if terminal_received:
+                        logger.info("Streaming completed successfully.")
+                    else:
+                        logger.warning("Streaming ended without done=true terminal chunk.")
 
-                logger.info("Streaming completed successfully.")
+                except GeneratorExit:
+                    # Caller cancelled the generator (client disconnect, stream lease expired).
+                    outcome = "cancelled"
+                    # Do not re-raise — GeneratorExit is handled by the generator protocol.
 
-            except GeneratorExit:
-                # Caller cancelled the generator (client disconnect, stream lease expired).
-                outcome = "cancelled"
-                # Do not re-raise — GeneratorExit is handled by the generator protocol.
+                except Timeout:
+                    outcome = "timeout"
+                    logger.exception("Streaming request timed out.")
+                    raise
 
-            except Timeout:
-                outcome = "timeout"
-                logger.exception("Streaming request timed out.")
-                raise
+                except RequestException as ex:
+                    outcome = "error"
+                    logger.exception(f"Streaming request failed: {ex}")
+                    raise
 
-            except RequestException as ex:
-                outcome = "error"
-                logger.exception(f"Streaming request failed: {ex}")
-                raise
+                except Exception as ex:
+                    outcome = "error"
+                    logger.exception(f"Unexpected streaming error: {ex}")
+                    raise
 
-            except Exception as ex:
-                outcome = "error"
-                logger.exception(f"Unexpected streaming error: {ex}")
-                raise
+                finally:
+                    # If terminal metadata was never set (cancelled, timeout, error, truncated stream),
+                    # explicitly record token_usage as unavailable/non-exact.
+                    if usage_box[0] is None:
+                        usage_box[0] = TokenUsage(
+                            prompt_tokens=None,
+                            completion_tokens=None,
+                            total_tokens=None,
+                            prompt_eval_duration=None,
+                            eval_duration=None,
+                            is_terminal=False,
+                            is_exact=False,
+                        )
 
-            finally:
-                # Record outcome metrics. Never fails generation.
-                try:
-                    from app.core.prometheus_exporter import metrics_registry
-                    duration = time.perf_counter() - t0
-                    metrics_registry.llm_requests_total.labels(
-                        model=self.model, outcome=outcome
-                    ).inc()
-                    metrics_registry.llm_generation_duration_seconds.labels(
-                        model=self.model
-                    ).observe(duration)
-                    if eval_count > 0:
-                        metrics_registry.llm_tokens_generated_total.labels(
+                    # Record outcome metrics. Never fails generation.
+                    try:
+                        from app.core.prometheus_exporter import metrics_registry
+                        duration = time.perf_counter() - t0
+                        metrics_registry.llm_requests_total.labels(
+                            model=self.model, outcome=outcome
+                        ).inc()
+                        metrics_registry.llm_generation_duration_seconds.labels(
                             model=self.model
-                        ).inc(eval_count)
-                except Exception:
-                    pass
+                        ).observe(duration)
+                        if eval_count > 0:
+                            metrics_registry.llm_tokens_generated_total.labels(
+                                model=self.model
+                            ).inc(eval_count)
+                    except Exception:
+                        pass
+
+        gen = _generator()
+        return StreamingResult(generator=gen, model=self.model, usage_box=usage_box)
+
+
 
