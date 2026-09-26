@@ -18,9 +18,42 @@ class OrganizationRepository:
     def get_by_slug(self, slug: str) -> Optional[Organization]:
         return self.db.query(Organization).filter(Organization.slug == slug).first()
 
-    def create(self, name: str, slug: str, domain: Optional[str] = None) -> Organization:
-        org = Organization(name=name, slug=slug, domain=domain, is_active=True)
+    def create(
+        self,
+        name: str,
+        slug: str,
+        domain: Optional[str] = None,
+        monthly_token_budget: Optional[int] = None,
+        max_storage_mb: Optional[int] = None,
+        max_documents: Optional[int] = None,
+    ) -> Organization:
+        org = Organization(
+            name=name,
+            slug=slug,
+            domain=domain,
+            is_active=True,
+            monthly_token_budget=monthly_token_budget,
+            max_storage_mb=max_storage_mb,
+            max_documents=max_documents,
+        )
         self.db.add(org)
+        self.db.commit()
+        self.db.refresh(org)
+        return org
+
+    def update_quotas(
+        self,
+        org_id: int,
+        monthly_token_budget: Optional[int] = None,
+        max_storage_mb: Optional[int] = None,
+        max_documents: Optional[int] = None,
+    ) -> Optional[Organization]:
+        org = self.get_by_id(org_id)
+        if not org:
+            return None
+        org.monthly_token_budget = monthly_token_budget
+        org.max_storage_mb = max_storage_mb
+        org.max_documents = max_documents
         self.db.commit()
         self.db.refresh(org)
         return org

@@ -1,8 +1,8 @@
 import uuid as py_uuid
 import datetime
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Integer, DateTime, ForeignKey, JSON, UniqueConstraint, func, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import String, Boolean, Integer, BigInteger, DateTime, ForeignKey, JSON, UniqueConstraint, CheckConstraint, func, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.database.base import Base
 
 if TYPE_CHECKING:
@@ -33,12 +33,26 @@ class Organization(Base):
     sso_tenant_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sso_metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, default=dict, nullable=True)
 
-    # Quotas Schema (Refinement #4)
+    # Quotas Schema (Refinement #4, AI-8 Phase B)
     max_users: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_workspaces: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_knowledge_bases: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_storage_mb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_documents: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    monthly_token_budget: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "monthly_token_budget IS NULL OR monthly_token_budget >= 0",
+            name="ck_org_monthly_token_budget_non_negative",
+        ),
+    )
+
+    @validates("monthly_token_budget", "max_storage_mb", "max_documents")
+    def validate_quota_non_negative(self, key: str, value: Optional[int]) -> Optional[int]:
+        if value is not None and value < 0:
+            raise ValueError(f"{key} must be a non-negative integer (got {value})")
+        return value
 
     # Soft Delete Strategy (Refinement #7)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
