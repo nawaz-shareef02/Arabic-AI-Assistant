@@ -49,6 +49,45 @@ _EXPANSION_SYSTEM = (
 
 _EXPANSION_MAX_TOKENS = 60
 
+# ---------------------------------------------------------------------------
+# Module-level shared Redis client — one connection for the process lifetime.
+# QueryExpansionService is constructed per RAG request; creating a new Redis
+# client on every construction introduces a TCP handshake + PING round-trip
+# per chat request.  Sharing the client across all instances eliminates this
+# overhead.  The client is lazily initialized on first use and falls back to
+# None (cache disabled) on any connection failure.
+# ---------------------------------------------------------------------------
+_shared_redis: Optional[redis.Redis] = None
+_redis_init_attempted: bool = False
+
+
+def _get_shared_redis() -> Optional[redis.Redis]:
+    """
+    Return the process-wide shared Redis client, creating it on first call.
+    Returns None if Redis is unavailable; caching is then silently disabled.
+    This is called once per process, not once per request.
+    """
+    global _shared_redis, _redis_init_attempted
+    if _redis_init_attempted:
+        return _shared_redis
+    _redis_init_attempted = True
+    try:
+        client = redis.Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            protocol=2,
+            socket_connect_timeout=2,
+        )
+        client.ping()
+        _shared_redis = client
+        logger.info("QueryExpansionService: shared Redis client connected.")
+    except Exception as exc:
+        logger.warning(
+            f"QueryExpansionService: Redis unavailable, caching disabled: {exc}"
+        )
+        _shared_redis = None
+    return _shared_redis
+
 
 class QueryExpansionService:
     """
@@ -59,25 +98,17 @@ class QueryExpansionService:
 
     Cache key: SHA-256 of the lowercased, stripped query.
     Cache TTL: settings.QUERY_EXPANSION_CACHE_TTL (default 3600s).
+
+    Redis lifecycle: a single shared Redis client is reused across all
+    instances (process-wide singleton) to avoid per-request connection
+    overhead.
     """
 
     def __init__(self) -> None:
         self._llm = OllamaProvider.get_instance()
-        self._redis: Optional[redis.Redis] = None
-        try:
-            self._redis = redis.Redis.from_url(
-                settings.REDIS_URL,
-                decode_responses=True,
-                protocol=2,
-                socket_connect_timeout=2,
-            )
-            self._redis.ping()
-            logger.debug("QueryExpansionService: Redis cache connected.")
-        except Exception as exc:
-            logger.warning(
-                f"QueryExpansionService: Redis unavailable, caching disabled: {exc}"
-            )
-            self._redis = None
+        # Reuse the shared process-level Redis client — do NOT create a new one.
+        self._redis: Optional[redis.Redis] = _get_shared_redis()
+
 
     # ------------------------------------------------------------------
     # Public API

@@ -145,22 +145,36 @@ class RAGService:
         conversation_id: int,
         content: str,
         citations: Optional[List[Dict[str, Any]]] = None,
-        completion_tokens: int = 0,
+        completion_tokens: Optional[int] = None,
+        prompt_tokens: Optional[int] = None,
     ) -> None:
         """
         Persists the assistant message using an isolated short-lived DB session
         only when persistence is actually required, preventing connection leaks.
+
+        Token counts
+        ------------
+        completion_tokens and prompt_tokens must come from the authoritative
+        OllamaProvider token contract (GenerationResult.token_usage or
+        StreamingResult.token_usage).  Neither is estimated or fabricated here.
+        If the provider metadata is unavailable (e.g. client disconnect before
+        the terminal chunk), the values are stored as 0 with no fabrication.
         """
         from app.database.session import SessionLocal
         db = SessionLocal()
+        # Guard: never store None in integer columns; 0 signals "unavailable".
+        _completion = completion_tokens if completion_tokens is not None else 0
+        _prompt = prompt_tokens if prompt_tokens is not None else 0
+        _total = _prompt + _completion
         try:
             MessageRepository(db).create(
                 conversation_id=conversation_id,
                 role=MessageRole.ASSISTANT,
                 content=content,
                 citations=citations,
-                completion_tokens=completion_tokens,
-                total_tokens=completion_tokens,
+                prompt_tokens=_prompt,
+                completion_tokens=_completion,
+                total_tokens=_total,
             )
         except Exception as exc:
             logger.error(f"Failed to persist assistant message for conv {conversation_id}: {exc}")
@@ -470,15 +484,23 @@ class RAGService:
         sources = self._build_sources(results)
 
         # ── Step 10: Save assistant message via isolated short-lived session ─
-        completion_tokens = len(answer.split())
+        # AI-8 Phase A: consume authoritative OllamaProvider token metadata.
+        # GenerationResult.token_usage is always present after a successful call.
+        # Do NOT use len(answer.split()) — word count is not a token count.
+        _usage = getattr(answer, "token_usage", None)
+        completion_tokens = _usage.completion_tokens if _usage is not None else None
+        prompt_tokens = _usage.prompt_tokens if _usage is not None else None
         self._persist_assistant_message(
             conversation_id=conversation_id,
             content=answer,
             citations=sources,
             completion_tokens=completion_tokens,
+            prompt_tokens=prompt_tokens,
         )
 
-        profiler.set("token_count", completion_tokens)
+        # Profiler: use the authoritative completion token count for observability.
+        # Fall back to 0 only for display — do not fabricate a stored value.
+        profiler.set("token_count", completion_tokens if completion_tokens is not None else 0)
         profiler.log_report("conversational")
 
         return {"answer": answer, "sources": sources}
@@ -614,8 +636,13 @@ class RAGService:
         accumulated_answer: str = ""
         stream_succeeded: bool = False
 
+        # AI-8 Phase A: hold the StreamingResult so we can read terminal token
+        # metadata after the stream completes.  The usage_box is mutated by
+        # OllamaProvider._generator() as the done=True terminal chunk arrives.
+        streaming_result = self.llm.stream_generate(prompt)
+
         try:
-            for token in self.llm.stream_generate(prompt):
+            for token in streaming_result:
                 if not first_token_recorded:
                     profiler.set_first_token()
                     first_token_recorded = True
@@ -630,15 +657,34 @@ class RAGService:
 
             # ── Step 9: Save assistant message ONLY on success via isolated session ──
             if stream_succeeded and accumulated_answer:
-                completion_tokens = len(accumulated_answer.split())
+                # AI-8 Phase A: use the authoritative StreamingResult token_usage.
+                # This is set by OllamaProvider from the done=True terminal chunk.
+                # Do NOT use len(accumulated_answer.split()) — word count != tokens.
+                # If the terminal chunk was never received (client disconnect, timeout),
+                # token_usage.is_exact=False and completion_tokens=None — preserved as 0,
+                # no fabrication.
+                _usage = getattr(streaming_result, "token_usage", None)
+                completion_tokens = (
+                    _usage.completion_tokens
+                    if _usage is not None and _usage.is_exact
+                    else None
+                )
+                prompt_tokens = (
+                    _usage.prompt_tokens
+                    if _usage is not None and _usage.is_exact
+                    else None
+                )
                 self._persist_assistant_message(
                     conversation_id=conversation_id,
                     content=accumulated_answer,
                     citations=sources,
                     completion_tokens=completion_tokens,
+                    prompt_tokens=prompt_tokens,
                 )
                 logger.info(
-                    f"Saved assistant message for conversation {conversation_id}"
+                    f"Saved assistant message for conversation {conversation_id} "
+                    f"(completion_tokens={completion_tokens}, "
+                    f"is_exact={_usage.is_exact if _usage else False})"
                 )
             elif not stream_succeeded:
                 logger.warning(
@@ -646,5 +692,13 @@ class RAGService:
                     "partial output NOT saved."
                 )
 
-            profiler.set("token_count", token_count)
+            # Profiler: chunk count (token_count) is a yield count, NOT a true
+            # token count.  Use Ollama eval_count when available for observability.
+            _usage_final = getattr(streaming_result, "token_usage", None)
+            _obs_tokens = (
+                _usage_final.completion_tokens
+                if _usage_final is not None and _usage_final.completion_tokens is not None
+                else token_count  # chunk count: approximate, for profiling only
+            )
+            profiler.set("token_count", _obs_tokens)
             profiler.log_report("conv-streaming")

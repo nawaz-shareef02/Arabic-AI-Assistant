@@ -48,15 +48,34 @@ class OrganizationRepository:
         max_storage_mb: Optional[int] = None,
         max_documents: Optional[int] = None,
     ) -> Optional[Organization]:
+        """
+        Partial quota update — only fields explicitly passed (non-None sentinel)
+        are written.  Fields left as None are NOT reset.
+
+        AI-8 Pre-C: the previous implementation unconditionally overwrote all
+        three quota fields, meaning a call that supplied only monthly_token_budget
+        would silently set max_storage_mb=None and max_documents=None (removing
+        those limits).  This is now fixed to preserve unmodified fields.
+
+        To explicitly REMOVE a quota limit (set it to NULL / unlimited), the
+        caller must use a dedicated sentinel or a future PATCH schema that
+        distinguishes "not supplied" from "explicitly set to None".  For now
+        this is an internal helper with no public route, so we use keyword
+        presence as the signal.
+        """
         org = self.get_by_id(org_id)
         if not org:
             return None
-        org.monthly_token_budget = monthly_token_budget
-        org.max_storage_mb = max_storage_mb
-        org.max_documents = max_documents
+        if monthly_token_budget is not None:
+            org.monthly_token_budget = monthly_token_budget
+        if max_storage_mb is not None:
+            org.max_storage_mb = max_storage_mb
+        if max_documents is not None:
+            org.max_documents = max_documents
         self.db.commit()
         self.db.refresh(org)
         return org
+
 
     def add_member(self, org_id: int, user_id: int) -> OrganizationMember:
         existing = (

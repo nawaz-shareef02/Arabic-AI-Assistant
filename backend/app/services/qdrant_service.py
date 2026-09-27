@@ -265,6 +265,16 @@ class QdrantService:
         organization_id: Optional[int] = None,
         knowledge_base_id: Optional[int] = None,
     ) -> bool:
+        # AI-8 Pre-C: Fail-closed tenant isolation.
+        # Destructive vector deletion MUST be scoped to a known organization.
+        # Allowing organization_id=None would allow a single parsed_document_id
+        # to match and delete vectors from ANY organization's data.
+        if organization_id is None:
+            raise ValueError(
+                "delete_document_vectors requires organization_id for tenant isolation. "
+                "Refusing to delete vectors without an explicit organization scope."
+            )
+
         must_conditions: List[dict] = [
             {
                 "key": "parsed_document_id",
@@ -273,11 +283,11 @@ class QdrantService:
                 }
             }
         ]
-        if organization_id is not None:
-            must_conditions.append({
-                "key": "organization_id",
-                "match": {"value": organization_id}
-            })
+        # organization_id is now mandatory (guarded above).
+        must_conditions.append({
+            "key": "organization_id",
+            "match": {"value": organization_id}
+        })
         if knowledge_base_id is not None:
             must_conditions.append({
                 "key": "knowledge_base_id",
