@@ -2,10 +2,14 @@
 OrganizationRepository — Data Access for Multi-Tenant Organizations & Workspaces.
 """
 
-from typing import List, Optional
+from typing import Any, List, Optional
 from sqlalchemy.orm import Session, selectinload
 from app.models.organization import Organization, OrganizationMember
 from app.models.workspace import Workspace
+
+
+# Sentinel object to distinguish "field omitted (leave unchanged)" from "explicitly set to None (unlimited)".
+UNSET: Any = object()
 
 
 class OrganizationRepository:
@@ -44,33 +48,24 @@ class OrganizationRepository:
     def update_quotas(
         self,
         org_id: int,
-        monthly_token_budget: Optional[int] = None,
-        max_storage_mb: Optional[int] = None,
-        max_documents: Optional[int] = None,
+        monthly_token_budget: Any = UNSET,
+        max_storage_mb: Any = UNSET,
+        max_documents: Any = UNSET,
     ) -> Optional[Organization]:
         """
-        Partial quota update — only fields explicitly passed (non-None sentinel)
-        are written.  Fields left as None are NOT reset.
-
-        AI-8 Pre-C: the previous implementation unconditionally overwrote all
-        three quota fields, meaning a call that supplied only monthly_token_budget
-        would silently set max_storage_mb=None and max_documents=None (removing
-        those limits).  This is now fixed to preserve unmodified fields.
-
-        To explicitly REMOVE a quota limit (set it to NULL / unlimited), the
-        caller must use a dedicated sentinel or a future PATCH schema that
-        distinguishes "not supplied" from "explicitly set to None".  For now
-        this is an internal helper with no public route, so we use keyword
-        presence as the signal.
+        Partial quota update supporting three semantics per field:
+        - NOT PROVIDED (UNSET): field is left unchanged.
+        - None: field is explicitly set to NULL (unlimited quota per Phase B policy).
+        - Integer >= 0: field is set to an explicit quota limit.
         """
         org = self.get_by_id(org_id)
         if not org:
             return None
-        if monthly_token_budget is not None:
+        if monthly_token_budget is not UNSET:
             org.monthly_token_budget = monthly_token_budget
-        if max_storage_mb is not None:
+        if max_storage_mb is not UNSET:
             org.max_storage_mb = max_storage_mb
-        if max_documents is not None:
+        if max_documents is not UNSET:
             org.max_documents = max_documents
         self.db.commit()
         self.db.refresh(org)

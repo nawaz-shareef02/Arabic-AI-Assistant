@@ -272,7 +272,10 @@ class RAGService:
         # ── Step 6: Build Sources ────────────────────────────────────────
         sources = self._build_sources(results)
 
-        profiler.set("token_count", len(answer.split()))
+        # AI-8 Phase A: consume authoritative OllamaProvider token metadata.
+        _usage = getattr(answer, "token_usage", None)
+        completion_tokens = _usage.completion_tokens if _usage is not None else None
+        profiler.set("token_count", completion_tokens if completion_tokens is not None else 0)
         profiler.log_report("non-streaming")
 
         logger.info("RAG pipeline completed successfully.")
@@ -358,8 +361,12 @@ class RAGService:
         first_token_recorded = False
         token_count: int = 0
 
+        # AI-8 Phase A: hold the StreamingResult so we can read terminal token
+        # metadata after the stream completes.
+        streaming_result = self.llm.stream_generate(prompt)
+
         try:
-            for token in self.llm.stream_generate(prompt):
+            for token in streaming_result:
                 if not first_token_recorded:
                     profiler.set_first_token()
                     first_token_recorded = True
@@ -368,7 +375,13 @@ class RAGService:
 
         finally:
             profiler.stop("llm")
-            profiler.set("token_count", token_count)
+            _usage_final = getattr(streaming_result, "token_usage", None)
+            _obs_tokens = (
+                _usage_final.completion_tokens
+                if _usage_final is not None and _usage_final.completion_tokens is not None
+                else token_count  # chunk count: fallback for observability only
+            )
+            profiler.set("token_count", _obs_tokens)
             profiler.log_report("streaming")
             logger.info("Streaming RAG pipeline completed.")
 

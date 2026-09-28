@@ -20,6 +20,18 @@ Coverage
 import pytest
 from unittest.mock import MagicMock, patch
 
+import app.services.query_expansion_service as qes
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_redis():
+    """Reset shared Redis singleton between tests for clean isolation."""
+    qes._shared_redis = None
+    qes._redis_init_attempted = False
+    yield
+    qes._shared_redis = None
+    qes._redis_init_attempted = False
+
 
 # ---------------------------------------------------------------------------
 # Test 1 — Cache HIT: cached value returned, LLM never called

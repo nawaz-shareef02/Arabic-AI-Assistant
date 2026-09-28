@@ -339,6 +339,35 @@ class TestUpdateQuotasPartial:
         )
         assert result is None
 
+    def test_explicit_none_sets_unlimited(self, db_session: Session):
+        """Passing None explicitly resets that quota to NULL (unlimited), while preserving omitted fields."""
+        from app.repositories.organization_repository import OrganizationRepository
+        from app.models.organization import Organization
+        import uuid as _uuid
+
+        org = Organization(
+            name="Q3",
+            slug=f"q3-{_uuid.uuid4().hex[:6]}",
+            is_active=True,
+            monthly_token_budget=500_000,
+            max_storage_mb=1000,
+            max_documents=50,
+        )
+        db_session.add(org)
+        db_session.commit()
+        db_session.refresh(org)
+
+        updated = OrganizationRepository(db_session).update_quotas(
+            org_id=org.id,
+            monthly_token_budget=None,  # explicitly set to unlimited
+            # max_storage_mb and max_documents omitted -> preserved
+        )
+
+        assert updated is not None
+        assert updated.monthly_token_budget is None  # explicitly reset to NULL
+        assert updated.max_storage_mb == 1000        # preserved
+        assert updated.max_documents == 50           # preserved
+
 
 # ============================================================
 # 1 — ask_with_history() authoritative token integration
@@ -506,4 +535,107 @@ class TestStreamAskWithHistoryTokenContract:
             f"Expected None for inexact metadata, got {cap.get('completion_tokens')}"
         )
         assert cap.get("prompt_tokens") is None
+
+
+# ============================================================
+# 7 — Stateless ask() and stream_ask() token integration
+# ============================================================
+
+class TestStatelessAskTokenContract:
+    """
+    Validates that RAGService.ask() consumes GenerationResult.token_usage
+    for profiler token_count, eliminating word count len(answer.split()).
+    """
+
+    def test_ask_consumes_exact_token_usage_not_word_count(self):
+        from app.services.rag_service import RAGService
+
+        with patch("app.services.rag_service.SearchService"), \
+             patch("app.services.rag_service.LLMFactory") as mock_factory, \
+             patch("app.services.rag_service.QueryExpansionService"), \
+             patch("app.services.rag_service.get_reranker"), \
+             patch("app.services.rag_service.PromptSecurityService"):
+
+            usage = TokenUsage(
+                prompt_tokens=40, completion_tokens=180, total_tokens=220,
+                is_terminal=True, is_exact=True,
+            )
+            # Answer is 3 words ("Short answer here."), but Ollama measured 180 completion tokens
+            gen = GenerationResult(text="Short answer here.", token_usage=usage, model="q")
+
+            mock_llm = MagicMock()
+            mock_llm.generate.return_value = gen
+            mock_factory.get_provider.return_value = mock_llm
+
+            svc = RAGService(MagicMock())
+            svc.search_service = MagicMock()
+            svc.search_service.hybrid_search.return_value = [
+                MagicMock(text="context", score=0.9, chunk_uuid="c1", parsed_document_id=1)
+            ]
+            svc._reranker = MagicMock()
+            svc._reranker.rerank.return_value = [
+                MagicMock(text="context", score=0.9, chunk_uuid="c1", parsed_document_id=1)
+            ]
+            svc._release_db = MagicMock()
+
+            with patch("app.services.rag_service.RetrievalProfiler") as mock_profiler_cls:
+                mock_prof = MagicMock()
+                mock_profiler_cls.return_value = mock_prof
+
+                resp = svc.ask(question="Test question?", knowledge_base_id=1)
+
+                assert resp["answer"] == "Short answer here."
+                # Must be set to 180 (from token_usage.completion_tokens), NOT 3 (from len(answer.split()))
+                mock_prof.set.assert_any_call("token_count", 180)
+
+
+class TestStatelessStreamAskTokenContract:
+    """
+    Validates that RAGService.stream_ask() consumes StreamingResult.token_usage
+    for profiler token_count when available.
+    """
+
+    def test_stream_ask_consumes_exact_tokens(self):
+        from app.services.rag_service import RAGService
+
+        with patch("app.services.rag_service.SearchService"), \
+             patch("app.services.rag_service.LLMFactory") as mock_factory, \
+             patch("app.services.rag_service.QueryExpansionService"), \
+             patch("app.services.rag_service.get_reranker"), \
+             patch("app.services.rag_service.PromptSecurityService"):
+
+            usage = TokenUsage(
+                prompt_tokens=25, completion_tokens=120, total_tokens=145,
+                is_terminal=True, is_exact=True,
+            )
+            stream_res = StreamingResult(
+                generator=iter(["tok1 ", "tok2 "]),  # 2 chunks
+                model="q",
+                usage_box=[usage],
+            )
+
+            mock_llm = MagicMock()
+            mock_llm.stream_generate.return_value = stream_res
+            mock_factory.get_provider.return_value = mock_llm
+
+            svc = RAGService(MagicMock())
+            svc.search_service = MagicMock()
+            svc.search_service.hybrid_search.return_value = [
+                MagicMock(text="context", score=0.9, chunk_uuid="c1", parsed_document_id=1)
+            ]
+            svc._reranker = MagicMock()
+            svc._reranker.rerank.return_value = [
+                MagicMock(text="context", score=0.9, chunk_uuid="c1", parsed_document_id=1)
+            ]
+            svc._release_db = MagicMock()
+
+            with patch("app.services.rag_service.RetrievalProfiler") as mock_profiler_cls:
+                mock_prof = MagicMock()
+                mock_profiler_cls.return_value = mock_prof
+
+                tokens = list(svc.stream_ask(question="Test question?", knowledge_base_id=1))
+                assert tokens == ["tok1 ", "tok2 "]
+                # Must be set to 120 (from token_usage.completion_tokens), NOT 2 (chunk count)
+                mock_prof.set.assert_any_call("token_count", 120)
+
 
