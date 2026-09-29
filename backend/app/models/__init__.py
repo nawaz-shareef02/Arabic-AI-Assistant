@@ -19,6 +19,12 @@ from app.models.user_session import UserSession
 from app.models.ai_benchmark_run import AIBenchmarkRun
 from app.models.backup_record import BackupRecord
 from app.models.password_reset_token import PasswordResetToken
+from app.models.ai_usage_event import (
+    AIUsageEvent,
+    AIUsageEventType,
+    AIUsageStatus,
+    QUOTA_BEARING_EVENT_TYPES,
+)
 
 __all__ = [
     "User",
@@ -45,4 +51,8 @@ __all__ = [
     "AIBenchmarkRun",
     "BackupRecord",
     "PasswordResetToken",
+    "AIUsageEvent",
+    "AIUsageEventType",
+    "AIUsageStatus",
+    "QUOTA_BEARING_EVENT_TYPES",
 ]
