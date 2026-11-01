@@ -52,3 +52,11 @@ Thumbs.db
 *.copy.txt
 .vscode/
 .idea/
+
+# Benchmark & smoke-test run artifacts (local results only, not source)
+backend/ai1_*.json
+backend/ai2_*.json
+backend/ai3_*.json
+backend/ai3b1_*.json
+backend/ai3b2_*.json
+backend/p24_*.json
