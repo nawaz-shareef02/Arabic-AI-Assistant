@@ -28,7 +28,7 @@ POST /chat/stream  — Streaming RAG with active concurrency lease management
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -68,6 +68,7 @@ router = APIRouter(
 def chat(
     request: ChatRequest,
     response: Response,
+    http_request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -83,6 +84,21 @@ def chat(
       6. Run RAG retrieval and LLM inference
     """
     try:
+        # Extract request and correlation IDs for ledger accounting and observability
+        req_id = None
+        corr_id = None
+        client_idemp_key = None
+        if http_request is not None:
+            req_id = getattr(http_request.state, "request_id", None) or http_request.headers.get("X-Request-ID")
+            corr_id = getattr(http_request.state, "correlation_id", None) or http_request.headers.get("X-Correlation-ID") or req_id
+            client_idemp_key = http_request.headers.get("Idempotency-Key") or http_request.headers.get("X-Idempotency-Key")
+
+        if not client_idemp_key and request.idempotency_key:
+            client_idemp_key = request.idempotency_key
+
+        if client_idemp_key:
+            client_idemp_key = client_idemp_key.strip()
+
         # ── Step 1: Authorize KB access ──────────────────────────────────────
         authorized_kb = authorize_knowledge_base_access(
             db,
@@ -148,6 +164,9 @@ def chat(
                 user_id=current_user.id,
                 organization_id=authorized_kb.organization_id,
                 user=current_user,
+                request_id=req_id,
+                correlation_id=corr_id,
+                idempotency_key=client_idemp_key,
             )
 
             _post_message_tasks_new_session(
@@ -163,6 +182,9 @@ def chat(
             knowledge_base_id=authorized_kb.id,
             organization_id=authorized_kb.organization_id,
             user=current_user,
+            request_id=req_id,
+            correlation_id=corr_id,
+            idempotency_key=client_idemp_key,
         )
 
     except OllamaOverloadedException:
@@ -192,6 +214,7 @@ def chat(
 )
 def stream_chat(
     request: ChatRequest,
+    http_request: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -205,6 +228,21 @@ def stream_chat(
          completes normally, encounters an error, or the client disconnects.
     """
     try:
+        # Extract request and correlation IDs for ledger accounting and observability
+        req_id = None
+        corr_id = None
+        client_idemp_key = None
+        if http_request is not None:
+            req_id = getattr(http_request.state, "request_id", None) or http_request.headers.get("X-Request-ID")
+            corr_id = getattr(http_request.state, "correlation_id", None) or http_request.headers.get("X-Correlation-ID") or req_id
+            client_idemp_key = http_request.headers.get("Idempotency-Key") or http_request.headers.get("X-Idempotency-Key")
+
+        if not client_idemp_key and request.idempotency_key:
+            client_idemp_key = request.idempotency_key
+
+        if client_idemp_key:
+            client_idemp_key = client_idemp_key.strip()
+
         # ── Step 1: Authorize KB access (before generator) ───────────────────
         authorized_kb = authorize_knowledge_base_access(
             db,
@@ -226,6 +264,9 @@ def stream_chat(
             )
 
         lease_id = rate_res.lease_id
+        if lease_id and not corr_id:
+            corr_id = lease_id
+
         user_id = current_user.id
         org_id = authorized_kb.organization_id
         kb_id = authorized_kb.id
@@ -294,6 +335,9 @@ def stream_chat(
                         user_id=user_id,
                         organization_id=org_id,
                         user=current_user,
+                        request_id=req_id,
+                        correlation_id=corr_id,
+                        idempotency_key=client_idemp_key,
                     )
                     _post_message_tasks_new_session(
                         conversation_id=conversation_id,
@@ -319,6 +363,9 @@ def stream_chat(
                     knowledge_base_id=kb_id,
                     organization_id=org_id,
                     user=current_user,
+                    request_id=req_id,
+                    correlation_id=corr_id,
+                    idempotency_key=client_idemp_key,
                 )
             except OllamaOverloadedException:
                 logger.warning("Streaming backpressure: Ollama inference slot unavailable.")

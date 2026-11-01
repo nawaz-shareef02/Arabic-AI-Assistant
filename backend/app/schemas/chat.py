@@ -18,6 +18,14 @@ class ChatRequest(BaseModel):
     # When absent, the stateless (original) pipeline runs unchanged.
     conversation_id: Optional[int] = None
 
+    # Optional client-provided idempotency key for durable usage deduplication (AI-8 C.2).
+    # Clients may also provide this via the Idempotency-Key or X-Idempotency-Key HTTP headers.
+    idempotency_key: Optional[str] = Field(
+        None,
+        max_length=160,
+        description="Optional client idempotency key for duplicate AI usage prevention.",
+    )
+
 
 class SourceResponse(BaseModel):
 

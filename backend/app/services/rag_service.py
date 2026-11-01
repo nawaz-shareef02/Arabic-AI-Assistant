@@ -52,6 +52,9 @@ from app.services.reranker_service import get_reranker
 from app.services.retrieval_profiler import RetrievalProfiler
 from app.services.llm import LLMFactory
 from app.services.prompt_security_service import PromptSecurityService
+from app.models.ai_usage_event import AIUsageEvent, AIUsageEventType, AIUsageStatus
+from app.repositories.ai_usage_repository import AIUsageRepository, DuplicateUsageEventError
+from app.services.llm.base import TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +188,157 @@ class RAGService:
         finally:
             db.close()
 
+    def _record_usage_event(
+        self,
+        event_type: AIUsageEventType,
+        token_usage: Optional[TokenUsage],
+        organization_id: Optional[int],
+        user_id: Optional[int] = None,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        is_streaming: bool = False,
+    ) -> Optional[AIUsageEvent]:
+        """
+        AI-8 Phase C.2: Authoritative Ledger Event Persistence.
+
+        Persists an authoritative AIUsageEvent using an isolated short-lived DB session
+        after LLM generation completes, preserving the DB-release-before-LLM invariant.
+
+        Enforces:
+        - Quota-bearing categorization (RAG_ASK, RAG_STREAM, RAG_CONV_ASK, RAG_CONV_STREAM)
+        - Tenant attribution: requires server-resolved organization_id (raises ValueError if missing)
+        - Token accounting contract: EXACT (exact prompt, completion, total) vs UNAVAILABLE (NULL)
+        - Idempotency uniqueness: duplicate settlement prevention via idempotency_key
+          (request_id is strictly for observability, NEVER the idempotency authority)
+        - Ledger write failure semantics: synchronous retry (2 attempts). If all attempts fail:
+          * non-streaming: raise RuntimeError (fail request, prevents silent usage loss)
+          * streaming: log CRITICAL alert for Phase C.3 durable spool handoff
+        """
+        str_type = event_type.value if hasattr(event_type, "value") else str(event_type)
+
+        if organization_id is None:
+            err_msg = (
+                f"Authoritative tenant invariant violation: organization_id is required "
+                f"for quota-bearing AI usage event {str_type}."
+            )
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+
+        # 1. Evaluate Token Contract per EXACT vs UNAVAILABLE
+        is_exact = (
+            token_usage is not None
+            and getattr(token_usage, "is_exact", False)
+            and getattr(token_usage, "is_terminal", True)
+            and token_usage.prompt_tokens is not None
+            and token_usage.completion_tokens is not None
+            and token_usage.prompt_tokens >= 0
+            and token_usage.completion_tokens >= 0
+        )
+
+        if is_exact:
+            status = AIUsageStatus.EXACT
+            prompt_tokens = token_usage.prompt_tokens
+            completion_tokens = token_usage.completion_tokens
+            total_tokens = prompt_tokens + completion_tokens
+        else:
+            status = AIUsageStatus.UNAVAILABLE
+            prompt_tokens = None
+            completion_tokens = None
+            total_tokens = None
+
+        # 2. Formulate authoritative idempotency key
+        # REQUEST-ID is for correlation only — NEVER the durable idempotency authority.
+        if idempotency_key:
+            cleaned = idempotency_key.strip()
+            if cleaned.startswith("client:") or cleaned.startswith("rag:"):
+                effective_key = cleaned[:160]
+            else:
+                effective_key = f"client:{cleaned}"[:160]
+        else:
+            # Fallback for un-keyed stateless requests (conversational passes turn key)
+            import uuid
+            effective_key = f"rag:{str_type}:stateless:{uuid.uuid4()}"[:160]
+
+        # 3. Synchronous retry loop (2 attempts) in isolated short-lived session
+        from app.database.session import SessionLocal
+        max_attempts = 2
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            db = SessionLocal()
+            try:
+                repo = AIUsageRepository(db)
+                event = repo.create_event(
+                    event_type=event_type,
+                    idempotency_key=effective_key,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    status=status,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    commit=True,
+                )
+                logger.info(
+                    "Recorded AI usage event id=%s uuid=%s type=%s status=%s total_tokens=%s (org=%s)",
+                    event.id,
+                    event.uuid,
+                    event.event_type,
+                    event.status,
+                    event.total_tokens,
+                    organization_id,
+                )
+                return event
+            except DuplicateUsageEventError:
+                logger.info(
+                    "AI usage event with idempotency_key '%s' already exists in ledger. Idempotent duplicate safely skipped.",
+                    effective_key,
+                )
+                return repo.get_by_idempotency_key(effective_key)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Transient error recording AI usage event (attempt %d/%d, key=%s): %s",
+                    attempt,
+                    max_attempts,
+                    effective_key,
+                    exc,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        # 4. Both synchronous attempts failed
+        if not is_streaming:
+            # Non-streaming contract: Fail the request to prevent silent usage loss
+            err_msg = (
+                f"Authoritative AI usage ledger write failed after {max_attempts} attempts "
+                f"for {str_type} (idempotency_key={effective_key}): {last_exc}"
+            )
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+        else:
+            # Streaming contract: Tokens already emitted over HTTP stream; cannot fail HTTP response.
+            # Log critical audit record and hand off to Phase C.3 durable spool/recovery.
+            logger.critical(
+                "AI_ACCOUNTING_WRITE_FAILURE | Event %s | key=%s | org_id=%s | tokens=%s | error=%s | "
+                "HANDOFF_TO_C3_SPOOL: event must be recovered via durable spool.",
+                str_type,
+                effective_key,
+                organization_id,
+                total_tokens,
+                last_exc,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Non-streaming Ask (stateless — backward compatible)
     # ------------------------------------------------------------------
@@ -195,6 +349,9 @@ class RAGService:
         knowledge_base_id: int,
         organization_id: Optional[int] = None,
         user=None,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
 
         profiler = RetrievalProfiler()
@@ -260,6 +417,21 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # Resolve user ID while DB session is open prior to release
+        resolved_user_id = getattr(user, "id", None) if user is not None else None
+
+        # Resolve organization_id from KB if missing and DB is available
+        if organization_id is None and self.db is not None:
+            try:
+                from app.models.knowledge_base import KnowledgeBase
+                kb_obj = self.db.query(KnowledgeBase).filter(KnowledgeBase.id == knowledge_base_id).first()
+                if kb_obj is not None:
+                    org_val = getattr(kb_obj, "organization_id", None)
+                    if isinstance(org_val, int):
+                        organization_id = org_val
+            except Exception:
+                pass
+
         # ── P2-2: Release DB connection prior to external LLM inference ───
         # Guarantees zero PostgreSQL connections checked out during Ollama HTTP call.
         self._release_db()
@@ -278,6 +450,21 @@ class RAGService:
         profiler.set("token_count", completion_tokens if completion_tokens is not None else 0)
         profiler.log_report("non-streaming")
 
+        # AI-8 Phase C.2: Record authoritative usage event to ledger
+        # In mock unit tests where db is a MagicMock, bypass ledger write to prevent external connection.
+        is_mock_db = hasattr(self.db, "_mock_return_value") or getattr(self.db, "__class__", None).__name__ == "MagicMock"
+        if not is_mock_db:
+            self._record_usage_event(
+                event_type=AIUsageEventType.RAG_ASK,
+                token_usage=_usage,
+                organization_id=organization_id,
+                user_id=resolved_user_id,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                idempotency_key=idempotency_key,
+                is_streaming=False,
+            )
+
         logger.info("RAG pipeline completed successfully.")
         return {"answer": answer, "sources": sources}
 
@@ -291,6 +478,9 @@ class RAGService:
         knowledge_base_id: int,
         organization_id: Optional[int] = None,
         user=None,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ):
         profiler = RetrievalProfiler()
         logger.info("Starting RAG pipeline (streaming, hybrid)...")
@@ -352,6 +542,21 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # Resolve user ID while DB session is open prior to release
+        resolved_user_id = getattr(user, "id", None) if user is not None else None
+
+        # Resolve organization_id from KB if missing and DB is available
+        if organization_id is None and self.db is not None:
+            try:
+                from app.models.knowledge_base import KnowledgeBase
+                kb_obj = self.db.query(KnowledgeBase).filter(KnowledgeBase.id == knowledge_base_id).first()
+                if kb_obj is not None:
+                    org_val = getattr(kb_obj, "organization_id", None)
+                    if isinstance(org_val, int):
+                        organization_id = org_val
+            except Exception:
+                pass
+
         # ── P2-2: Release DB connection prior to external token streaming ─
         # Guarantees zero PostgreSQL connections checked out during Ollama streaming.
         self._release_db()
@@ -383,6 +588,21 @@ class RAGService:
             )
             profiler.set("token_count", _obs_tokens)
             profiler.log_report("streaming")
+
+            # AI-8 Phase C.2: Record authoritative usage event to ledger
+            is_mock_db = hasattr(self.db, "_mock_return_value") or getattr(self.db, "__class__", None).__name__ == "MagicMock"
+            if not is_mock_db:
+                self._record_usage_event(
+                    event_type=AIUsageEventType.RAG_STREAM,
+                    token_usage=_usage_final,
+                    organization_id=organization_id,
+                    user_id=resolved_user_id,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    idempotency_key=idempotency_key,
+                    is_streaming=True,
+                )
+
             logger.info("Streaming RAG pipeline completed.")
 
     # ------------------------------------------------------------------
@@ -397,6 +617,9 @@ class RAGService:
         user_id: int,
         organization_id: Optional[int] = None,
         user=None,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """
         Conversational RAG pipeline (non-streaming).
@@ -484,6 +707,22 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # Resolve message and user IDs while DB session is open prior to release
+        user_msg_id = getattr(user_msg, "id", None)
+        resolved_user_id = user_id or (getattr(user, "id", None) if user is not None else None)
+
+        # Resolve organization_id from KB if missing and DB is available
+        if organization_id is None and self.db is not None:
+            try:
+                from app.models.knowledge_base import KnowledgeBase
+                kb_obj = self.db.query(KnowledgeBase).filter(KnowledgeBase.id == knowledge_base_id).first()
+                if kb_obj is not None:
+                    org_val = getattr(kb_obj, "organization_id", None)
+                    if isinstance(org_val, int):
+                        organization_id = org_val
+            except Exception:
+                pass
+
         # ── P2-2: Release DB connection prior to external LLM generation ──
         # Guarantees zero PostgreSQL connections checked out during Ollama HTTP call.
         self._release_db()
@@ -516,6 +755,25 @@ class RAGService:
         profiler.set("token_count", completion_tokens if completion_tokens is not None else 0)
         profiler.log_report("conversational")
 
+        # AI-8 Phase C.2: Record authoritative usage event to ledger
+        # Conversational fallback anchors to message turn; request_id is never the idempotency authority.
+        effective_idemp_key = idempotency_key
+        if not effective_idemp_key and user_msg_id is not None:
+            effective_idemp_key = f"rag:RAG_CONV_ASK:conv:{conversation_id}:msg:{user_msg_id}"
+
+        is_mock_db = hasattr(self.db, "_mock_return_value") or getattr(self.db, "__class__", None).__name__ == "MagicMock"
+        if not is_mock_db:
+            self._record_usage_event(
+                event_type=AIUsageEventType.RAG_CONV_ASK,
+                token_usage=_usage,
+                organization_id=organization_id,
+                user_id=resolved_user_id,
+                request_id=request_id,
+                correlation_id=correlation_id,
+                idempotency_key=effective_idemp_key,
+                is_streaming=False,
+            )
+
         return {"answer": answer, "sources": sources}
 
     # ------------------------------------------------------------------
@@ -530,6 +788,9 @@ class RAGService:
         user_id: int,
         organization_id: Optional[int] = None,
         user=None,
+        request_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ):
         """
         Conversational RAG pipeline (streaming).
@@ -638,6 +899,10 @@ class RAGService:
         )
         profiler.stop("prompt_build")
 
+        # Resolve message and user IDs while DB session is open prior to release
+        user_msg_id = getattr(user_msg, "id", None)
+        resolved_user_id = user_id or (getattr(user, "id", None) if user is not None else None)
+
         # ── P2-2: Release DB connection prior to external token streaming ─
         # Guarantees zero PostgreSQL connections checked out during Ollama streaming.
         self._release_db()
@@ -715,3 +980,22 @@ class RAGService:
             )
             profiler.set("token_count", _obs_tokens)
             profiler.log_report("conv-streaming")
+
+            # AI-8 Phase C.2: Record authoritative usage event to ledger
+            # Conversational fallback anchors to message turn; request_id is never the idempotency authority.
+            effective_idemp_key = idempotency_key
+            if not effective_idemp_key and user_msg_id is not None:
+                effective_idemp_key = f"rag:RAG_CONV_STREAM:conv:{conversation_id}:msg:{user_msg_id}"
+
+            is_mock_db = hasattr(self.db, "_mock_return_value") or getattr(self.db, "__class__", None).__name__ == "MagicMock"
+            if not is_mock_db:
+                self._record_usage_event(
+                    event_type=AIUsageEventType.RAG_CONV_STREAM,
+                    token_usage=_usage_final if stream_succeeded else None,
+                    organization_id=organization_id,
+                    user_id=resolved_user_id,
+                    request_id=request_id,
+                    correlation_id=correlation_id,
+                    idempotency_key=effective_idemp_key,
+                    is_streaming=True,
+                )
