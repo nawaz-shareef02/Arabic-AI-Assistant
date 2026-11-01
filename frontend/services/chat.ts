@@ -1,4 +1,4 @@
-import { api, getCsrfToken } from "@/utils/api";
+import { api, API_BASE_URL, getCsrfToken } from "@/utils/api";
 
 // ─────────────────────────────────────────────
 // Types
@@ -100,14 +100,13 @@ export const ChatService = {
     signal?: AbortSignal,
     conversationId?: number
   ): Promise<void> {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
     const csrfToken = getCsrfToken();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
     };
 
-    const response = await fetch(`${API_URL}/api/v1/chat/stream`, {
+    const response = await fetch(`${API_BASE_URL}/chat/stream`, {
       method: "POST",
       headers,
       credentials: "include", // Transmit HttpOnly auth_token & csrf_token cookies automatically
