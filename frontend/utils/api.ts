@@ -1,6 +1,7 @@
 import axios from "axios";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_ROOT = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+export const API_BASE_URL = API_ROOT.endsWith("/api/v1") ? API_ROOT : `${API_ROOT}/api/v1`;
 
 /**
  * Reads a specific cookie value by name in browser context.
@@ -19,7 +20,7 @@ export function getCsrfToken(): string | null {
 }
 
 export const api = axios.create({
-  baseURL: `${API_URL}/api/v1`,
+  baseURL: API_BASE_URL,
   withCredentials: true, // Automatically sends HttpOnly auth_token & csrf_token cookies
   headers: {
     "Content-Type": "application/json",
